@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境 / 凭证（.env.example 是模板，保留）
+.env
+.venv/
+venv/
+
+# 口播音频与转录（工作产物，不入仓库）
+*.m4a
+*.mp3
+*.wav
+*_transcript_*.txt
+
+# IDE
+.vscode/
+.idea/
