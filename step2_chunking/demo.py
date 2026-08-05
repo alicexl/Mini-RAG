@@ -19,33 +19,28 @@
 # （句子 "。"），再不行换更细的（逗号），最后兜底按字符硬切。
 # 目标：让每个 chunk 尽量落在语义边界上，而不是把一句话劈成两半。
 class RecursiveTextSplitter:
-    def __init__(self, chunk_size=200, chunk_overlap=0,
-                 separators=("\n\n", "\n", "。", "！", "？", "；", "，", " ", "")):
+    # 按优先级从高到低排列的分隔符：段落 → 换行 → 句号 → … → 空格 → 空串（字符级兜底，必须放末尾）
+    SEPARATORS = ("\n\n", "\n", "。", "！", "？", "；", "，", " ", "")
+
+    def __init__(self, chunk_size=200, chunk_overlap=0):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        self.separators = list(separators)
 
     def split_text(self, text: str) -> list[str]:
         # 两步：先把文本递归切成"语义小块"，再把相邻小块合并成 ~chunk_size 的 chunk
-        pieces = self._split(text, self.separators)
+        pieces = self._split(text, self.SEPARATORS)
         return self._merge(pieces)
 
     def _split(self, text: str, separators: list[str]) -> list[str]:
         """递归切：返回尽可能落在语义边界的小块（每块 <= chunk_size，或已无可细分）。"""
-        # 在 separators 里找优先级最高、且出现在文本中的分隔符；都没有则用空串（按字符）
-        chosen, rest = "", []
+        # 按优先级找第一个出现在 text 里的分隔符；一路找到空串还没命中，就字符级硬切
         for i, sep in enumerate(separators):
-            if sep == "":
-                chosen, rest = "", []
-                break
-            if sep in text:
+            if sep == "":          # 遍历到空串 = 没有语义边界可用了
+                return [text[j:j + self.chunk_size]
+                        for j in range(0, len(text), self.chunk_size)]
+            if sep in text:        # 命中第一个出现的分隔符
                 chosen, rest = sep, separators[i + 1:]
                 break
-
-        # 空串兜底：直接按 chunk_size 硬切字符（此时每块必 <= chunk_size）
-        if chosen == "":
-            return [text[i:i + self.chunk_size]
-                    for i in range(0, len(text), self.chunk_size)]
 
         # 按 chosen 切，并把分隔符加回每块末尾（保留边界，合并时能还原原文）。
         # 跳过纯空白 part：递归到句子层时，上层遗留的 \n\n 会被 split 暴露成空白
@@ -57,10 +52,8 @@ class RecursiveTextSplitter:
             piece = part + chosen
             if len(piece) <= self.chunk_size:
                 pieces.append(piece)                       # 够小，直接收
-            elif rest:
-                pieces.extend(self._split(piece, rest))    # 太大，换更细的分隔符继续切
             else:
-                pieces.append(piece)                       # 没有更细的分隔符了，整块收
+                pieces.extend(self._split(piece, rest))    # 太大，换更细的分隔符继续切
         return pieces
 
     def _merge(self, pieces: list[str]) -> list[str]:
@@ -90,11 +83,17 @@ def split_fixed(text: str, chunk_size: int) -> list[str]:
 
 # ===== Demo =====
 SAMPLE_TEXT = """\
-盐湖股份2024年实现营业收入150亿元，同比增长12%。公司主营业务为钾肥和碳酸锂，其中钾肥业务是主要收入来源。钾肥产能位居全国前列，2024年产量保持稳定。
+盐湖股份2024年实现营业收入150亿元，同比增长12%；归母净利润45亿元，同比增长20%。公司业绩增长主要得益于钾肥价格回暖与碳酸锂产销两旺。年报显示，公司整体毛利率较上年提升3个百分点，盈利能力持续改善。
 
-碳酸锂价格在2024年持续下跌，从年初的10万元/吨跌至年末的7万元/吨。尽管如此，盐湖股份的碳酸锂产能仍位居全国前列，2024年产量达到3.5万吨。公司依托察尔汗盐湖的资源优势，具备较低的生产成本。
+钾肥是公司的传统主业，产能位居全国前列。2024年氯化钾产量约500万吨，销量保持稳定，国内市场份额持续领先。钾肥业务贡献了公司过半的营业收入和利润，是业绩的压舱石。报告期内，公司推进百万吨钾肥扩建项目，投产后将进一步巩固产能优势。
 
-展望未来，公司计划继续扩大碳酸锂产能，并推进盐湖提锂技术的研发。同时，钾肥业务有望受益于国际农产品价格上涨带来的需求提升。管理层对2025年的业绩持谨慎乐观态度。"""
+碳酸锂是公司的第二增长曲线。2024年碳酸锂产量达到3.5万吨，产能位居全国前列。公司依托察尔汗盐湖丰富的卤水资源，采用盐湖提锂工艺，生产成本显著低于矿石提锂企业，具备较强的成本优势。盐湖提锂的吨成本约为矿石法的六成，在价格下行周期中仍能保持盈利。
+
+碳酸锂价格在2024年持续下跌，从年初的10万元/吨跌至年末的7万元/吨，行业整体承压。尽管价格走低，盐湖股份凭借低成本优势，碳酸锂业务仍保持盈利，成为少数逆周期盈利的锂盐企业。
+
+公司持续加大研发投入，重点推进盐湖提锂技术的迭代升级与提锂吸附剂的国产化替代。2024年研发投入同比增长15%，多项技术成果实现产业化应用。公司还与高校联合攻关高镁锂比卤水提锂难题，进一步降低生产成本。
+
+展望未来，公司计划继续扩大碳酸锂产能，目标三年内将产能提升至5万吨。钾肥业务有望受益于国际农产品价格上涨带来的需求提升。管理层对2025年的业绩持谨慎乐观态度，同时提示碳酸锂价格波动与下游需求不及预期的风险。公司表示将持续优化产品结构，提升抗周期能力。"""
 
 
 def _print_chunks(chunks: list[str], title: str):
@@ -111,7 +110,7 @@ def main():
     print("Step 2: 文档分块 —— 理解 Chunking")
     print("=" * 64)
 
-    print(f"\n示例文本（{len(SAMPLE_TEXT)} 字，3 个段落）：")
+    print(f"\n示例文本（{len(SAMPLE_TEXT)} 字，6 个段落）：")
     print("  " + SAMPLE_TEXT[:42].replace("\n", "↵ ") + " …")
 
     # 演示 1：固定字符切分（反面教材）
@@ -129,15 +128,16 @@ def main():
     _print_chunks(splitter.split_text(SAMPLE_TEXT), "递归 chunk_size=80")
     print("\n✓ 每块都落在句号/换行边界上，语义完整。")
 
-    # 演示 3：chunk_size 太小 vs 太大
+    # 演示 3：chunk_size 太小 vs 合适 vs 太大
     print("\n" + "=" * 64)
-    print("演示 3：chunk_size 的权衡（太小 vs 太大）")
+    print("演示 3：chunk_size 的权衡（太小 vs 合适 vs 太大）")
     print("=" * 64)
-    for size in (40, 200):
+    for size in (40, 200, 800):
         s = RecursiveTextSplitter(chunk_size=size, chunk_overlap=0)
         _print_chunks(s.split_text(SAMPLE_TEXT), f"递归 chunk_size={size}")
-    print("\n  chunk_size=40 太小：一句话被拆成多块，单块语义不全；块数多，检索碎。")
-    print("  chunk_size=200 太大：多段塞一块，检索定位不到具体段落，信息被稀释。")
+    print("\n  chunk_size=40 太小：一句话被拆成多块，单块语义不全；块数爆炸，检索碎。")
+    print("  chunk_size=200 合适：每块聚焦一个主题，落在甜区（中文经验 200~500 字）。")
+    print("  chunk_size=800 太大：整篇塞一块，回到'整篇压一个向量'的信息稀释。")
 
     # 演示 4：overlap
     print("\n" + "=" * 64)
