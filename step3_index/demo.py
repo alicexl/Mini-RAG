@@ -45,6 +45,7 @@ class Embedder:
 # ===== RecursiveTextSplitter（同 step2，内联以便 demo 自包含）=====
 # 按分隔符优先级切（段落→换行→句号→…→空格→空串兜底），尽量让每块落在语义边界。
 class RecursiveTextSplitter:
+    # 按优先级从高到低排列的分隔符：段落 → 换行 → 句号 → … → 空格 → 空串（字符级兜底，必须放末尾）
     SEPARATORS = ("\n\n", "\n", "。", "！", "？", "；", "，", " ", "")
 
     def __init__(self, chunk_size=200, chunk_overlap=0):
@@ -52,42 +53,62 @@ class RecursiveTextSplitter:
         self.chunk_overlap = chunk_overlap
 
     def split_text(self, text: str) -> list[str]:
-        # 两步：先递归切成落在语义边界的小块，再把相邻小块合并成 ~chunk_size 的 chunk
-        pieces = self._split(text, self.SEPARATORS)
-        return self._merge(pieces)
+        # 两步：先把文本递归切成「片段 + 它后接的分隔符」，再把相邻片段累积成 ~chunk_size 的 chunk
+        pairs = self._split(text, self.SEPARATORS, trailing="")
+        return self._merge(pairs)
 
-    def _split(self, text: str, separators: list[str]) -> list[str]:
+    def _split(self, text: str, separators: list[str], trailing: str) -> list[tuple[str, str]]:
+        """递归切：返回 [(片段, 该片段后接的分隔符), ...]，每片 <= chunk_size。
+
+        trailing 是「这段 text 在原文里后接的分隔符」，由外层传入。关键：递归切出的**最后一片**
+        接 trailing、而非本层分隔符——这样外层分隔符（如句号）和本层分隔符（如逗号）不会堆在
+        同一片尾部（避免 "。，" 这种标点粘连）。其余片段接本层分隔符，如实反映原文边界。
+        """
+        # 按优先级找第一个出现在 text 里的分隔符；一路找到空串还没命中，就字符级硬切
         for i, sep in enumerate(separators):
-            if sep == "":          # 空串 = 没有语义边界了，字符级硬切兜底
-                return [text[j:j + self.chunk_size]
-                        for j in range(0, len(text), self.chunk_size)]
+            if sep == "":          # 遍历到空串 = 没有语义边界可用了，字符级硬切兜底
+                pieces = [text[j:j + self.chunk_size] for j in range(0, len(text), self.chunk_size)]
+                return [(p, trailing if k == len(pieces) - 1 else "")
+                        for k, p in enumerate(pieces)]
             if sep in text:        # 命中第一个出现的分隔符
-                chosen, rest = sep, separators[i + 1:]
+                rest = separators[i + 1:]
                 break
-        pieces = []
-        for part in text.split(chosen):
-            if not part.strip():   # 跳空白残片，避免 "\n。" 垃圾块
-                continue
-            piece = part + chosen
-            if len(piece) <= self.chunk_size:
-                pieces.append(piece)
-            else:
-                pieces.extend(self._split(piece, rest))
-        return pieces
 
-    def _merge(self, pieces: list[str]) -> list[str]:
+        # 按 sep 切出纯片段（不带分隔符），跳过空白残片，避免 "\n" 垃圾片混进来
+        parts = [p for p in text.split(sep) if p.strip()]
+        out = []
+        for k, p in enumerate(parts):
+            # 末片接外层 trailing（穿透到上层边界），其余接本层 sep —— 这正是避免标点粘连的关键
+            after = trailing if k == len(parts) - 1 else sep
+            if len(p) <= self.chunk_size:
+                out.append((p, after))                       # 够小，直接收
+            else:
+                out.extend(self._split(p, rest, after))      # 太大，换更细的分隔符继续切
+        return out
+
+    def _merge(self, pairs: list[tuple[str, str]]) -> list[str]:
+        """把相邻片段累积成接近 chunk_size 的 chunk；相邻 chunk 之间留 chunk_overlap 的重叠。"""
         chunks, cur, cur_len = [], [], 0
-        for p in pieces:
-            if cur and cur_len + len(p) > self.chunk_size:
-                chunks.append("".join(cur))
+        for text, sep in pairs:
+            block_len = len(text) + len(sep)                 # 这片完整长度（含后接分隔符）
+            if cur and cur_len + block_len > self.chunk_size:
+                # 累积要超了 → 先把当前这批封成一个 chunk
+                chunks.append(self._join(cur))
+                # overlap：从开头弹出整片，直到剩余长度 <= overlap
+                # （下一个 chunk 接着这段开始 → 相邻块共享边界内容，避免漏检）
                 while cur and cur_len > self.chunk_overlap:
-                    cur_len -= len(cur[0])
+                    cur_len -= len(cur[0][0]) + len(cur[0][1])
                     cur.pop(0)
-            cur.append(p)
-            cur_len += len(p)
+            cur.append((text, sep))
+            cur_len += block_len
         if cur:
-            chunks.append("".join(cur))
+            chunks.append(self._join(cur))
         return chunks
+
+    @staticmethod
+    def _join(cur: list[tuple[str, str]]) -> str:
+        """把累积的 (内容,分隔符) 片段拼成文本：每片内容后跟它的分隔符。"""
+        return "".join(text + sep for text, sep in cur)
 
 
 # ===== VectorStore：最小的向量库 =====
