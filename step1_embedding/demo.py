@@ -9,7 +9,6 @@
     python step1_embedding/demo.py
 """
 
-import math
 import os
 import sys
 
@@ -45,8 +44,8 @@ class Embedder:
     def cosine_similarity(a: list[float], b: list[float]) -> float:
         """两个向量的余弦相似度，范围 [-1, 1]，越接近 1 越相似。"""
         dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(x * x for x in b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
         if norm_a == 0 or norm_b == 0:
             return 0.0  # 零向量防御，避免除零
         return dot / (norm_a * norm_b)

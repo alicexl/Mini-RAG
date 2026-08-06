@@ -14,6 +14,10 @@ venv/
 *.wav
 *_transcript_*.txt
 
+# step3 demo 生成的向量库（运行产物）
+step3_index/vector_store.json
+step3_index/vector_store.npy
+
 # IDE
 .vscode/
 .idea/
