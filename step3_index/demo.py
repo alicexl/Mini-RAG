@@ -1,7 +1,7 @@
 """Step 3: 本地向量库 —— 存起来，检索出来
 
 学习目标:
-- 切好的 chunk 怎么存（向量 + 原文分开存）
+- 切好的 chunk 怎么存（向量 + 原文 + 元信息分开存）
 - 检索到底在做什么（查询向量 vs 所有 chunk 向量，算余弦，取 Top-K）
 - 从零搭一个最小的向量库（JSON + numpy），把 step1 的 embedding + step2 的切块
   串成一条完整的检索链路
@@ -107,32 +107,39 @@ class RecursiveTextSplitter:
 
 
 # ===== VectorStore：最小的向量库 =====
-# 存：原文走 JSON，向量走 numpy .npy（向量是数值矩阵，numpy 存取快、占空间小）。
+# 存：data/ 目录下三个文件——原文 chunks.json、向量 embeddings.npy、元信息 metadata.json。
+# 元信息记每块的来源/标题等（检索命中后知道这段出自哪），是真实 RAG 项目的存储布局。
 # 检索：查询向量 vs 所有 chunk 向量算余弦相似度，按降序取 Top-K（线性扫描，朴素但够用）。
 class VectorStore:
     def __init__(self):
         self.chunks: list[str] = []          # 原文，按入库顺序
         self.vectors: np.ndarray = None      # (N, dim) 的向量矩阵
+        self.metadata: list[dict] = []       # 与 chunks 等长：每块的来源、标题等元信息
 
-    def add(self, texts: list[str], embedder: Embedder):
-        """把若干段文本 embed 后入库。"""
+    def add(self, texts: list[str], embedder: Embedder, metadata: list[dict] | None = None):
+        """把若干段文本 embed 后入库；metadata 与 texts 等长，记录每块的来源等信息。"""
         vecs = embedder.embed_batch(texts)
         new = np.array(vecs, dtype=np.float32)
         self.vectors = new if self.vectors is None else np.vstack([self.vectors, new])
         self.chunks.extend(texts)
+        self.metadata.extend(metadata or [{} for _ in texts])
 
-    def save(self, path: str):
-        """持久化：原文 → <path>.json，向量 → <path>.npy。"""
-        path = Path(path)
-        path.with_suffix(".json").write_text(
-            json.dumps(self.chunks, ensure_ascii=False, indent=2), encoding="utf-8")
-        np.save(path.with_suffix(".npy"), self.vectors)
+    def save(self, data_dir: str):
+        """持久化到 data/ 目录：原文、向量、元信息各一个文件。"""
+        data_dir = Path(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "chunks.json").write_text(
+            json.dumps(self.chunks, ensure_ascii=False, indent=2), encoding="utf-8")   # 原文
+        np.save(data_dir / "embeddings.npy", self.vectors)                              # 向量矩阵
+        (data_dir / "metadata.json").write_text(
+            json.dumps(self.metadata, ensure_ascii=False, indent=2), encoding="utf-8")  # 元信息
 
-    def load(self, path: str):
-        """从磁盘读回一个向量库。"""
-        path = Path(path)
-        self.chunks = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-        self.vectors = np.load(path.with_suffix(".npy"))
+    def load(self, data_dir: str):
+        """从 data/ 目录读回一个向量库。"""
+        data_dir = Path(data_dir)
+        self.chunks = json.loads((data_dir / "chunks.json").read_text(encoding="utf-8"))
+        self.vectors = np.load(data_dir / "embeddings.npy")
+        self.metadata = json.loads((data_dir / "metadata.json").read_text(encoding="utf-8"))
 
     def search(self, query: str, embedder: Embedder, top_k=3) -> list[tuple[int, float, str]]:
         """检索：查询向量 vs 所有 chunk 向量算余弦，取相似度最高的 Top-K。"""
@@ -186,36 +193,39 @@ def main():
 
     store = VectorStore()
     try:
-        store.add(chunks, embedder)
+        store.add(chunks, embedder,
+                  metadata=[{"source": "盐湖股份2024年年报（示例）"} for _ in chunks])
     except Exception as e:
         print(f"\n[ERROR] 向量化失败：{e}")
         print("请确认 Ollama 已启动（ollama serve）且模型已下载（ollama pull qwen3-embedding:0.6b）")
         sys.exit(1)
-    print(f"    入库 {len(store.chunks)} 个 chunk，向量矩阵 shape={store.vectors.shape}")
+    print(f"    入库 {len(store.chunks)} 个 chunk，向量矩阵 shape={store.vectors.shape}，元信息 {len(store.metadata)} 条")
 
-    # ---- [2] 持久化：存盘 → 重新加载 ----
-    print("\n[2] 持久化：save → load")
-    store_path = str(Path(__file__).parent / "vector_store")   # 相对 demo.py 所在目录，从哪跑都行
-    store.save(store_path)
-    print(f"    存盘：{store_path}.json（原文 {len(store.chunks)} 条）+ {store_path}.npy（向量 {store.vectors.shape}）")
+    # ---- [2] 持久化：存盘 → 重新加载（data/ 目录三件套）----
+    print("\n[2] 持久化：save → load（data/ 目录：chunks.json + embeddings.npy + metadata.json）")
+    data_dir = str(Path(__file__).parent / "data")   # 相对 demo.py 所在目录，从哪跑都行
+    store.save(data_dir)
+    print(f"    存盘 {data_dir}/：chunks.json（原文 {len(store.chunks)} 条）+ embeddings.npy（向量 {store.vectors.shape}）+ metadata.json（元信息 {len(store.metadata)} 条）")
     store2 = VectorStore()
-    store2.load(store_path)
-    print(f"    重载：{len(store2.chunks)} 个 chunk，向量矩阵 {store2.vectors.shape}（与原库一致）")
+    store2.load(data_dir)
+    print(f"    重载：{len(store2.chunks)} 个 chunk，向量矩阵 {store2.vectors.shape}，元信息 {len(store2.metadata)} 条（与原库一致）")
 
     # ---- [3] 检索：Top-3 ----
-    print("\n[3] 检索 Top-3")
+    print("\n[3] 检索 Top-3（每行带元信息里的来源）")
     for q in QUERIES:
         print(f"\n    查询: {q}")
         for idx, sim, chunk in store.search(q, embedder, top_k=3):
             preview = chunk.replace("\n", "↵")[:46]
-            print(f"      [{idx}] sim={sim:.3f}  {preview}")
+            src = store.metadata[idx].get("source", "")
+            print(f"      [{idx}] sim={sim:.3f}  [{src}] {preview}")
 
     print("\n" + "=" * 64)
     print("解读:")
     print("=" * 64)
     print("  - '赚了多少钱' 命中讲营业收入/净利润的块 —— 查询词和原文不完全重合，靠语义命中")
     print("  - 每个查询的 Top 结果都是对应主题的块，说明 chunk_size=200 的切块 + 余弦检索 work")
-    print("  - 完整链路：文档→切块→embed→存→查询embed→余弦TopK，这就是 RAG 的检索部分")
+    print("  - 检索结果带元信息（来源）—— 命中后知道这段出自哪份文档，RAG 里可追溯、可引用")
+    print("  - 完整链路：文档→切块→embed→存(data/ 三件套)→查询embed→余弦TopK，这就是 RAG 的检索部分")
 
 
 if __name__ == "__main__":
