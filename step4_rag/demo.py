@@ -62,10 +62,13 @@ class RecursiveTextSplitter:
     def _split(self, text: str, separators: list[str]) -> list[str]:
         """递归切：返回落在语义边界的小块（每块 <= chunk_size，自带后接的分隔符）。
 
-        命中 sep 后用它切 text，给**非末片焊上本层 sep、末片不焊**。末片不焊是因为：它后面在
-        原文接的是上层分隔符——那个上层 sep 已被外层焊在 part 尾部、跟着递归下行到这里的 text
-        里（sep 物理地在文本中，不靠参数传）。这样本层 sep 只焊在非末片，不会和残留在末片尾部
-        的上层 sep 堆出 "。，" 标点粘连。
+        命中 sep 后用它切 text，给**非末片焊上本层 sep、末片不焊**。末片不焊是因为：本层切出的
+        末片，要么后面在原文里什么都没有（文档真末尾），要么尾巴上已物理带着上层分隔符（如
+        "，"-层切出的末片 "…较强的成本优势。"，句号是外层焊下来跟着文本进来的）——这两种情况
+        焊本层 sep 都会错位（"。，" 粘连、或标点落空）。所以本层 sep 只焊在非末片。
+
+        关键：parts 保留 `split` 的全部结果（含空串、"\n\n" 空白残片）——末片位由空白残片占着，
+        真句子落在非末片位置、正常焊回自己的分隔符。
         """
         # 按优先级找第一个出现在 text 里的分隔符；一路找到空串还没命中，就字符级硬切
         for i, sep in enumerate(separators):
@@ -75,11 +78,11 @@ class RecursiveTextSplitter:
                 rest = separators[i + 1:]
                 break
 
-        # 按 sep 切出片段，跳过空白残片，避免 "\n" 垃圾片混进来
-        parts = [p for p in text.split(sep) if p.strip()]
+        # parts 保留全部结果（含空串、"\n\n" 空白残片）——它们正好占末片位
+        parts = text.split(sep)
         pieces = []
         for k, p in enumerate(parts):
-            piece = p if k == len(parts) - 1 else p + sep    # 末片不焊（接的是上层带来的 sep），其余焊本层 sep
+            piece = p if k == len(parts) - 1 else p + sep    # 末片不焊（后面没东西/已带上层 sep），其余焊本层 sep
             if len(piece) <= self.chunk_size:
                 pieces.append(piece)                          # 够小，直接收（自带后接分隔符）
             else:
