@@ -20,3 +20,5 @@ step3_index/data/
 # IDE
 .vscode/
 .idea/
+# step4 demo 生成的向量库（运行产物）
+step4_rag/data/

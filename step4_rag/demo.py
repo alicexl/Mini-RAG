@@ -5,8 +5,12 @@
 - RAG 里「增强（Augmented）」那一步到底做了什么：把检索回来的 chunk 作为 context 塞进 prompt
 - 「给 LLM 看检索结果再回答」的完整链路长什么样
 
-运行:
-    PYTHONUTF8=1 python step4_rag/demo.py
+用法（两个命令，按用户场景划分）:
+    # ① 导入单个文档：拆分 + 向量化 + 入库（幂等：同来源已导入则跳过，来源名取文件名）
+    PYTHONUTF8=1 python step4_rag/demo.py ingest <文档路径>
+
+    # ② 启动交互式问答 terminal（quit / exit 退出）
+    PYTHONUTF8=1 python step4_rag/demo.py chat
 
 依赖:
 - Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用，同 step1/3）
@@ -16,12 +20,18 @@
   ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
 """
 
+import argparse
+import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import requests
 from anthropic import Anthropic
+
+# 向量库持久化目录（chunks.json + embeddings.npy + metadata.json 三件套，同 step3）
+DATA_DIR = Path(__file__).parent / "data"
 
 # ===== Embedder（同 step1，内联以便 demo 自包含）=====
 # 把文本喂给 Ollama 的 embedding 模型拿回向量；model/base_url 从环境变量读，默认连本地 Ollama。
@@ -110,16 +120,38 @@ class RecursiveTextSplitter:
 
 
 # ===== VectorStore（同 step3，内联以便 demo 自包含）=====
+# data/ 目录下三个文件：原文 chunks.json、向量 embeddings.npy、元信息 metadata.json。
+# 元信息记每块的来源（哪份文档），检索命中后知道答案出自哪。
 class VectorStore:
     def __init__(self):
         self.chunks: list[str] = []
         self.vectors: np.ndarray = None      # (N, dim)
+        self.metadata: list[dict] = []       # 与 chunks 等长：每块的来源等元信息
 
-    def add(self, texts: list[str], embedder: Embedder):
+    def add(self, texts: list[str], embedder: Embedder, metadata: list[dict] | None = None):
+        """把若干段文本 embed 后入库；metadata 与 texts 等长，记录每块的来源等信息。"""
         vecs = embedder.embed_batch(texts)
         new = np.array(vecs, dtype=np.float32)
         self.vectors = new if self.vectors is None else np.vstack([self.vectors, new])
         self.chunks.extend(texts)
+        self.metadata.extend(metadata or [{} for _ in texts])
+
+    def save(self, data_dir: str):
+        """持久化到 data/ 目录：原文、向量、元信息各一个文件。"""
+        data_dir = Path(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "chunks.json").write_text(
+            json.dumps(self.chunks, ensure_ascii=False, indent=2), encoding="utf-8")
+        np.save(data_dir / "embeddings.npy", self.vectors)
+        (data_dir / "metadata.json").write_text(
+            json.dumps(self.metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def load(self, data_dir: str):
+        """从 data/ 目录读回一个向量库。"""
+        data_dir = Path(data_dir)
+        self.chunks = json.loads((data_dir / "chunks.json").read_text(encoding="utf-8"))
+        self.vectors = np.load(data_dir / "embeddings.npy")
+        self.metadata = json.loads((data_dir / "metadata.json").read_text(encoding="utf-8"))
 
     def search(self, query: str, embedder: Embedder, top_k=3) -> list[tuple[int, float, str]]:
         """检索：查询向量 vs 所有 chunk 向量算余弦，取相似度最高的 Top-K。"""
@@ -136,7 +168,7 @@ class VectorStore:
 
 # ===== Generator：调 LLM 生成（本章的新东西）=====
 # 检索回来的 chunk 是文本，要交给 LLM 才能生成自然语言答案。这里走智谱 GLM 的 Anthropic 兼容网关。
-# API Key 三种配置方式（与 mini-agent 一致）：
+# API Key 三种配置方式：
 #   1. 环境变量 ANTHROPIC_API_KEY（推荐，设了 env 免改代码）
 #   2. 直接改下面的 API_KEY 常量
 #   3. 都没设 → 运行时交互式输入（仅本次运行有效，不持久化）
@@ -196,79 +228,102 @@ def rag_answer(question: str, store: VectorStore, embedder: Embedder,
     return retrieved, answer
 
 
-# ===== Demo =====
-SAMPLE_DOC = """\
-盐湖股份2024年实现营业收入150亿元，同比增长12%；归母净利润45亿元，同比增长20%。公司业绩增长主要得益于钾肥价格回暖与碳酸锂产销两旺。年报显示，公司整体毛利率较上年提升3个百分点，盈利能力持续改善。
+# ===== 命令一：ingest —— 导入单个文档 =====
+def cmd_ingest(doc_path: str):
+    """读文档 → 切块(step2) → 向量化(step1) → 入库(step3)。
 
-钾肥是公司的传统主业，产能位居全国前列。2024年氯化钾产量约500万吨，销量保持稳定，国内市场份额持续领先。钾肥业务贡献了公司过半的营业收入和利润，是业绩的压舱石。报告期内，公司推进百万吨钾肥扩建项目，投产后将进一步巩固产能优势。
+    来源名取文件名（metadata 用它标注，检索结果里能看到出自哪份文档）。
+    幂等：同来源已在库中则跳过（按 metadata 的 source 判定），重复导入不重复入库。
+    """
+    text = Path(doc_path).read_text(encoding="utf-8")
+    source = Path(doc_path).stem
 
-碳酸锂是公司的第二增长曲线。2024年碳酸锂产量达到3.5万吨，产能位居全国前列。公司依托察尔汗盐湖丰富的卤水资源，采用盐湖提锂工艺，生产成本显著低于矿石提锂企业，具备较强的成本优势。盐湖提锂的吨成本约为矿石法的六成，在价格下行周期中仍能保持盈利。
+    store = VectorStore()
+    if (DATA_DIR / "chunks.json").exists():
+        store.load(str(DATA_DIR))
+    if any(m.get("source") == source for m in store.metadata):
+        print(f"[SKIP]「{source}」已在库中（共 {len(store.chunks)} chunks），跳过。")
+        print(f"      要重新导入请先删掉 {DATA_DIR}/")
+        return
 
-碳酸锂价格在2024年持续下跌，从年初的10万元/吨跌至年末的7万元/吨，行业整体承压。尽管价格走低，盐湖股份凭借低成本优势，碳酸锂业务仍保持盈利，成为少数逆周期盈利的锂盐企业。
+    splitter = RecursiveTextSplitter(chunk_size=200)
+    chunks = splitter.split_text(text)
+    embedder = Embedder()
+    try:
+        store.add(chunks, embedder, metadata=[{"source": source} for _ in chunks])
+    except Exception as e:
+        print(f"[ERROR] 向量化失败：{e}")
+        print("请确认 Ollama 已启动且模型已下载（ollama pull qwen3-embedding:0.6b）")
+        sys.exit(1)
+    store.save(str(DATA_DIR))
+    print(f"[OK]「{source}」：{len(text)} 字 → {len(chunks)} 块，向量矩阵 {store.vectors.shape}")
+    print(f"     库现有 {len(store.chunks)} 个 chunk（{DATA_DIR}/）")
 
-公司持续加大研发投入，重点推进盐湖提锂技术的迭代升级与提锂吸附剂的国产化替代。2024年研发投入同比增长15%，多项技术成果实现产业化应用。公司还与高校联合攻关高镁锂比卤水提锂难题，进一步降低生产成本。
 
-展望未来，公司计划继续扩大碳酸锂产能，目标三年内将产能提升至5万吨。钾肥业务有望受益于国际农产品价格上涨带来的需求提升。管理层对2025年的业绩持谨慎乐观态度，同时提示碳酸锂价格波动与下游需求不及预期的风险。公司表示将持续优化产品结构，提升抗周期能力。"""
-
-# 三个查询：前两个的答案藏在原文里（看 LLM 能否从检索到的 chunk 抽出来），
-# 第三个故意问原文没写的（看 LLM 是不是真能守住「资料中未提及」而不是瞎编）
+# ===== 命令二：chat —— 交互式问答 terminal =====
+# 示例问题：前两个的答案在语料里（看 LLM 能否从检索到的 chunk 抽出来），
+# 最后一个语料没写（看 LLM 是不是真能守住「资料中未提及」而不是瞎编）。
 QUERIES = [
     "公司2024年赚了多少钱？",
-    "锂业务的产能有多大？",
-    "公司2025年打算给股东分红多少？",   # 原文未提及 → 检验 LLM 守不守规矩
+    "2023年和2024年，钾肥产销量分别是什么水平？",
+    "公司2025年打算给股东分红多少？",   # 语料未提及 → 检验 LLM 守不守规矩
 ]
 
 
-def main():
-    print("=" * 64)
-    print("Step 4: 完整 RAG —— 检索增强生成")
-    print("=" * 64)
-
+def cmd_chat():
+    """交互式问答 terminal：输入问题 → 检索 Top-K（带来源）→ 拼 context → LLM 生成。"""
     embedder = Embedder()
-    generator = Generator()
-    print(f"\n检索模型: {embedder.model} @ {embedder.base_url}")
-    print(f"生成模型: {generator.model}")
-
-    # ---- [1] 建库：切块(step2) → embed(step1) → 入库(step3) ----
-    print("\n[1] 建库：切块 + 向量化 + 入库")
-    splitter = RecursiveTextSplitter(chunk_size=200)
-    chunks = splitter.split_text(SAMPLE_DOC)
     store = VectorStore()
-    try:
-        store.add(chunks, embedder)
-    except Exception as e:
-        print(f"\n[ERROR] 向量化失败：{e}")
-        print("请确认 Ollama 已启动且模型已下载（ollama pull qwen3-embedding:0.6b）")
+    if not (DATA_DIR / "chunks.json").exists():
+        print("[ERROR] 向量库为空。请先导入文档：")
+        print("    python step4_rag/demo.py ingest <文档路径> [--source 来源名]")
         sys.exit(1)
-    print(f"    文档 {len(SAMPLE_DOC)} 字 → {len(chunks)} 块，向量矩阵 {store.vectors.shape}")
+    store.load(str(DATA_DIR))
+    generator = Generator()
 
-    # ---- [2] RAG：检索 → 拼 prompt → 生成 ----
-    print("\n[2] RAG 问答（检索 Top-3 → 拼 prompt → LLM 生成）")
+    print("=" * 64)
+    print(f"向量库：{len(store.chunks)} 个 chunk（检索 {embedder.model} / 生成 {generator.model}）")
+    print("输入问题开始问答，quit / exit 退出。试试：")
     for q in QUERIES:
-        print("\n" + "-" * 64)
-        print(f"问：{q}")
+        print(f"  · {q}")
+    print("=" * 64)
+
+    while True:
+        q = input("\n查询> ").strip()
+        if q.lower() in ("quit", "exit", "q", "退出"):
+            break
+        if not q:
+            continue
         try:
             retrieved, answer = rag_answer(q, store, embedder, generator, top_k=3)
         except Exception as e:
             print(f"\n[ERROR] 生成失败：{e}")
-            print("请确认已配置 chat 模型的鉴权（ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）")
-            sys.exit(1)
+            print("请确认已配置 chat 模型鉴权（ANTHROPIC_API_KEY / API_KEY 常量 / 交互输入）")
+            continue
 
-        print("\n检索回来的 Top-3 chunk（作为【参考资料】喂给 LLM）：")
+        print("\n检索 Top-3（方括号里是元信息里的来源）：")
         for i, (idx, sim, chunk) in enumerate(retrieved, 1):
-            preview = chunk.replace("\n", "↵")[:40]
-            print(f"  [{i}] (chunk#{idx}, sim={sim:.3f}) {preview}")
-
+            src = store.metadata[idx].get("source", "")
+            preview = chunk.replace("\n", "↵")[:46]
+            print(f"  [{i}] sim={sim:.3f} [{src}] {preview}")
         print("\nLLM 生成：")
         print(text_wrap(answer))
 
-    print("\n" + "=" * 64)
-    print("解读:")
-    print("=" * 64)
-    print("  - 前两问的答案藏在检索回来的 chunk 里 → LLM 能抽出来并标注编号")
-    print("  - 第三问原文没写分红 → 守规矩的 LLM 应回答「资料中未提及」而非瞎编")
-    print("  - 完整链路：文档→切块→embed→入库→查询检索→拼context→LLM生成")
-    print("    这就是 RAG：检索(Retrieval) + 增强(Augmented) + 生成(Generation)")
+
+def main():
+    parser = argparse.ArgumentParser(description="Step 4: 完整 RAG —— 检索增强生成")
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="{ingest,chat}")
+
+    p_ingest = sub.add_parser("ingest", help="导入单个文档（拆分 + 向量化 + 入库，幂等）")
+    p_ingest.add_argument("doc", help="文档路径（md/txt），来源名取文件名")
+
+    sub.add_parser("chat", help="启动交互式问答 terminal")
+
+    args = parser.parse_args()
+    if args.cmd == "ingest":
+        cmd_ingest(args.doc)
+    else:
+        cmd_chat()
 
 
 def text_wrap(s: str, width: int = 60) -> str:
