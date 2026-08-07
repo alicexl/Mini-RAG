@@ -10,9 +10,10 @@
 
 依赖:
 - Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用，同 step1/3）
-- 一个 chat 模型。默认走智谱 GLM 的 Anthropic 兼容网关（glm-5.2），auth 读环境变量
-  ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN（anthropic SDK 标准行为，与 mini-agent 一致）。
-  换模型/网关用 ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
+- 一个 chat 模型。默认走智谱 GLM 的 Anthropic 兼容网关（glm-5.2）。API Key 三种配置：
+  ① 环境变量 ANTHROPIC_API_KEY（推荐）；② 改 demo.py 顶部 API_KEY 常量；
+  ③ 都没设 → 运行时交互式输入（仅本次运行有效）。换模型/网关用
+  ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
 """
 
 import os
@@ -134,8 +135,13 @@ class VectorStore:
 
 
 # ===== Generator：调 LLM 生成（本章的新东西）=====
-# 检索回来的 chunk 是文本，要交给 LLM 才能生成自然语言答案。这里走智谱 GLM 的 Anthropic 兼容网关；
-# anthropic SDK 会自动读 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 两个环境变量做鉴权（与 mini-agent 一致）。
+# 检索回来的 chunk 是文本，要交给 LLM 才能生成自然语言答案。这里走智谱 GLM 的 Anthropic 兼容网关。
+# API Key 三种配置方式（与 mini-agent 一致）：
+#   1. 环境变量 ANTHROPIC_API_KEY（推荐，设了 env 免改代码）
+#   2. 直接改下面的 API_KEY 常量
+#   3. 都没设 → 运行时交互式输入（仅本次运行有效，不持久化）
+API_KEY = ""
+
 _CHAT_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
 _CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.2")
 
@@ -144,7 +150,14 @@ class Generator:
     """把 prompt 喂给 chat 模型，拿回生成的文本。"""
 
     def __init__(self, base_url: str = _CHAT_BASE_URL, model: str = _CHAT_MODEL):
-        self.client = Anthropic(base_url=base_url)   # api_key/auth_token 走 env
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or API_KEY
+        if not api_key:                      # env 和常量都没设 → 交互式输入（仅本次运行有效）
+            print("\n检测到尚未配置 API Key，请输入（仅本次运行有效）")
+            print("如需持久化：请设置环境变量 ANTHROPIC_API_KEY，或改 demo.py 顶部的 API_KEY 常量")
+            api_key = input("API Key: ").strip()
+            if not api_key:
+                raise SystemExit("未提供 API Key，退出")
+        self.client = Anthropic(base_url=base_url, api_key=api_key)
         self.model = model
 
     def answer(self, system: str, user: str, max_tokens: int = 1024) -> str:
