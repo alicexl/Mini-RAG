@@ -89,13 +89,15 @@ def _table_self_contained(block: str) -> str:
 
 
 def _clean_lines(text: str) -> str:
-    """清掉 PDF 提取混进来的碎片行：页码、勾选框残行、页眉残留（如 "5   E"）。
-    规则：纯数字行、非中文且有效内容过短的行、只有 □√是否 的行。"""
+    """清掉 PDF 提取混进来的碎片行 + 压缩列对齐空格。
+    丢：纯数字行（页码）、勾选框残行、无中文内容的页眉/页码残留行（如 "5   E"）。
+    留：去前导/尾部空白、行内连续空格压成单个（杀 PDF 多列对齐空格，如资质证书表）。
+    空行保留作段落分隔（splitter 靠空行识别段落）。"""
     out = []
     for raw in text.split('\n'):
         s = raw.strip()
         if not s:
-            out.append(raw)
+            out.append('')                               # 保留空行作段落分隔
             continue
         if re.fullmatch(r'\d+', s):                      # 页码
             continue
@@ -104,7 +106,11 @@ def _clean_lines(text: str) -> str:
         core = re.sub(r'[\s\dA-Za-z.%,（）()\-]', '', s)  # 去掉数字/字母/符号后的有效内容
         if not core:                                     # 无中文内容 = 页眉/页码残留（如 "5   E"、"2024"）
             continue
-        out.append(raw)
+        s = re.sub(r'(?:[A-Za-z]{1,3}[.,，。、\s]+){4,}[A-Za-z]{1,3}', '', s)  # 删 PDF 打碎的英文残片（连续短字母 token）
+        s = s.strip()
+        if not s:
+            continue
+        out.append(re.sub(r' {2,}', ' ', s))             # 写回清洗后的行：压行内多空格、去前后空白
     return '\n'.join(out)
 
 

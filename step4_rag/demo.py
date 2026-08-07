@@ -225,7 +225,7 @@ def rag_answer(question: str, store: VectorStore, embedder: Embedder,
     context = build_context(retrieved)                             # Augmented（把检索结果拼进 prompt）
     user = f"【参考资料】\n{context}\n\n【用户问题】\n{question}"
     answer = generator.answer(SYSTEM_PROMPT, user)                 # Generation
-    return retrieved, answer
+    return retrieved, answer, context
 
 
 # ===== 命令一：ingest —— 导入单个文档 =====
@@ -276,7 +276,7 @@ def cmd_chat():
     store = VectorStore()
     if not (DATA_DIR / "chunks.json").exists():
         print("[ERROR] 向量库为空。请先导入文档：")
-        print("    python step4_rag/demo.py ingest <文档路径> [--source 来源名]")
+        print("    python step4_rag/demo.py ingest <文档路径>")
         sys.exit(1)
     store.load(str(DATA_DIR))
     generator = Generator()
@@ -295,7 +295,7 @@ def cmd_chat():
         if not q:
             continue
         try:
-            retrieved, answer = rag_answer(q, store, embedder, generator, top_k=3)
+            retrieved, answer, context = rag_answer(q, store, embedder, generator, top_k=3)
         except Exception as e:
             print(f"\n[ERROR] 生成失败：{e}")
             print("请确认已配置 chat 模型鉴权（ANTHROPIC_API_KEY / API_KEY 常量 / 交互输入）")
@@ -307,7 +307,13 @@ def cmd_chat():
             raw = chunk.replace("\n", "↵")
             preview = raw[:46] + ("…" if len(raw) > 46 else "")
             print(f"  [{i}] sim={sim:.3f} [{src}] {preview}")
-        print("\nLLM 生成：")
+        # 增强：把检索结果拼成 prompt 喂给 LLM —— RAG 的关键一步（检索结果 → prompt）
+        print("\n→ 拼 prompt 喂给 LLM（增强 = 检索结果 + system 约束）：")
+        print("  [system] 只能用【参考资料】，引用编号（如「根据[1]」），没有就说没有")
+        ctx_oneline = context.replace(chr(10), " ")
+        print(f"  [参考资料] {ctx_oneline[:80]}{'…' if len(ctx_oneline) > 80 else ''}")
+        print(f"  [用户问题] {q}")
+        print("\n→ LLM 生成：")
         print(text_wrap(answer))
 
 
