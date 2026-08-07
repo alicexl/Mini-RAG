@@ -301,10 +301,11 @@ def cmd_chat():
             print("请确认已配置 chat 模型鉴权（ANTHROPIC_API_KEY / API_KEY 常量 / 交互输入）")
             continue
 
-        print("\n检索 Top-3（方括号里是元信息里的来源）：")
+        print("\n检索 Top-3（[1][2][3] 即 LLM 回答里「根据[1]」的引用；方括号里是元信息来源）：")
         for i, (idx, sim, chunk) in enumerate(retrieved, 1):
             src = store.metadata[idx].get("source", "")
-            preview = chunk.replace("\n", "↵")[:46]
+            raw = chunk.replace("\n", "↵")
+            preview = raw[:46] + ("…" if len(raw) > 46 else "")
             print(f"  [{i}] sim={sim:.3f} [{src}] {preview}")
         print("\nLLM 生成：")
         print(text_wrap(answer))

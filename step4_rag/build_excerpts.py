@@ -88,6 +88,26 @@ def _table_self_contained(block: str) -> str:
     return '\n'.join(out)
 
 
+def _clean_lines(text: str) -> str:
+    """清掉 PDF 提取混进来的碎片行：页码、勾选框残行、页眉残留（如 "5   E"）。
+    规则：纯数字行、非中文且有效内容过短的行、只有 □√是否 的行。"""
+    out = []
+    for raw in text.split('\n'):
+        s = raw.strip()
+        if not s:
+            out.append(raw)
+            continue
+        if re.fullmatch(r'\d+', s):                      # 页码
+            continue
+        if re.fullmatch(r'[□√]\s*(是|适用)?\s*[□√]?\s*(否|不适用)?\s*', s):   # 勾选框残行
+            continue
+        core = re.sub(r'[\s\dA-Za-z.%,（）()\-]', '', s)  # 去掉数字/字母/符号后的有效内容
+        if not core:                                     # 无中文内容 = 页眉/页码残留（如 "5   E"、"2024"）
+            continue
+        out.append(raw)
+    return '\n'.join(out)
+
+
 def _fix_product_orphans(block: str) -> str:
     """产销量表：产品名（氯化钾/碳酸锂制造业）被 PDF 列序挤到本组的「生产量」行，
     同组的「销售量/库存量」行成了孤儿（且 PDF 行序是 销量→产量→库存 交错，
@@ -136,7 +156,7 @@ def build_one(year: str) -> None:
             out += [f'## {r[0]}', body, '']
 
     fn = os.path.join(DST, f'盐湖股份{year}年年报（节选）.md')
-    md = '\n'.join(out)
+    md = _clean_lines('\n'.join(out))
     open(fn, 'w', encoding='utf-8').write(md)
     print(f'{year}: {len(md)} 字 ≈ {len(md.encode("utf-8")) / 1024:.0f} KB → {os.path.basename(fn)}')
 
