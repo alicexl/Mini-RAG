@@ -17,6 +17,7 @@ import re
 
 import fitz
 
+# 年报 PDF 来源目录（写死本机路径；sample_reports/ 已入仓，他人无需重跑此脚本）
 SRC = r'D:/workspace/财务报表/盐湖股份'
 DST = os.path.join(os.path.dirname(__file__), 'sample_reports')
 
@@ -163,7 +164,8 @@ def build_one(year: str) -> None:
 
     fn = os.path.join(DST, f'盐湖股份{year}年年报（节选）.md')
     md = _clean_lines('\n'.join(out))
-    open(fn, 'w', encoding='utf-8').write(md)
+    with open(fn, 'w', encoding='utf-8') as f:
+        f.write(md)
     print(f'{year}: {len(md)} 字 ≈ {len(md.encode("utf-8")) / 1024:.0f} KB → {os.path.basename(fn)}')
 
 

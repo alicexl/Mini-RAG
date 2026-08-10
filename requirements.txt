@@ -1,3 +1,4 @@
 requests
 numpy
 anthropic
+gradio>=5.0

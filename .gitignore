@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 环境 / 凭证（.env.example 是模板，保留）
+# 环境 / 凭证
 .env
 .venv/
 venv/
@@ -22,3 +22,6 @@ step3_index/data/
 .idea/
 # step4 demo 生成的向量库（运行产物）
 step4_rag/data/
+
+# step5 demo 生成的向量库（运行产物）
+step5_app/data/

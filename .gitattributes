@@ -1,0 +1,2 @@
+# 统一换行符：文本文件入库规范化为 LF，Windows 检出时按需转 CRLF
+* text=auto

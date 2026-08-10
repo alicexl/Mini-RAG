@@ -6,7 +6,7 @@
 - 余弦相似度如何衡量向量之间的距离
 
 运行:
-    python step1_embedding/demo.py
+    PYTHONUTF8=1 python step1_embedding/demo.py
 """
 
 import os
