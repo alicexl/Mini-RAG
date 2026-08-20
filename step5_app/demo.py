@@ -3,7 +3,7 @@
 学习目标:
 - 把 step4 的命令行 RAG 套成一个 Web 聊天界面（Gradio）
 - 三个产品化改造：① Web 聊天界面 ② 流式生成（答案一个字一个字蹦出来）
-  ③ 文档管理面板（上传/导入文档，不用改命令换语料）
+  ③ 文档管理面板（点「导入」弹系统文件框选文档，本地 demo 特有）
 - RAG 的核心链路（检索→拼 context→system 约束→生成）和 step4 完全一样，
   本章只在外面包一层 UI —— 看清「产品化」到底改了什么、没改什么。
 
@@ -20,7 +20,9 @@
 import json
 import os
 import re
+import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog
 
 import gradio as gr
 import numpy as np
@@ -29,8 +31,8 @@ from anthropic import Anthropic
 
 # 向量库持久化目录（同 step3/4 的三件套：chunks.json + embeddings.npy + metadata.json）
 DATA_DIR = Path(__file__).parent / "data"
-# 示例语料：复用 step4 已清洗好的盐湖股份 3 年年报节选（跨步引用，同讲稿互链惯例）
-SAMPLE_DIR = Path(__file__).parent.parent / "step4_rag" / "sample_reports"
+# 示例语料目录：「导入」弹框的默认打开位置（从 step4 拷来的盐湖股份 3 年年报节选；不锁死，别处的 md/txt 也能选）
+SAMPLE_DIR = Path(__file__).parent / "sample_reports"
 
 
 # ================================================================
@@ -184,7 +186,7 @@ class Generator:
 # 复用：SYSTEM_PROMPT + build_context（同 step4）—— RAG 的「增强」内核，UI 不改它
 # ================================================================
 SYSTEM_PROMPT = (
-    "你是一个严谨的财报问答助手。只能根据下面【参考资料】里的内容回答用户问题，"
+    "你是一个严谨的问答助手。只能根据下面【参考资料】里的内容回答用户问题，"
     "并在用到某条资料时标注它的编号（如「根据[1]」）。"
     "如果【参考资料】里没有相关信息，就如实回答「资料中未提及」，禁止编造。"
 )
@@ -218,7 +220,7 @@ def _status_text(note: str | None = None) -> str:
     """左栏库状态：现有多少 chunk、已导入哪些文档（按来源去重）。"""
     n = len(store.chunks)
     sources = sorted({m.get("source", "?") for m in store.metadata})
-    src_lines = "\n".join(f"- {s}" for s in sources) or "_(空，请上传文档后点「导入向量库」)_"
+    src_lines = "\n".join(f"- {s}" for s in sources) or "_(空，请点「导入」选择文档)_"
     out = f"**向量库**：{n} 个 chunk\n\n**已导入文档**：\n{src_lines}"
     if note:
         out += f"\n\n_{note}_"
@@ -256,34 +258,36 @@ def _ingest_text(text: str, source: str) -> tuple[int, bool, str]:
     return len(chunks), True, f"[OK]「{source}」+{len(chunks)} 块"
 
 
-def ingest_files(file_paths):
-    """「导入向量库」按钮回调：读上传的 md/txt → 切块 → 入库。"""
-    if not file_paths:
-        return _status_text("⚠️ 没有选中文件"), gr.update()
-    notes = []
-    for p in file_paths:
-        path = p if isinstance(p, str) else getattr(p, "name", str(p))
+def ingest_dialog():
+    """「导入」按钮回调：弹系统文件选择框（默认打开 sample_reports/），选中即导入。
+
+    本地 demo 限定：服务端和浏览器在同一台机器，服务端弹的框用户才看得见——
+    真部署到远端服务器，框会弹在服务器上没人点（产品化边界，见讲稿）。
+    """
+    root = tk.Tk()
+    root.withdraw()                    # 不显示主窗口，只要对话框
+    root.attributes("-topmost", True)  # 保证框弹在浏览器前面，不被挡住
+    paths = filedialog.askopenfilenames(
+        title="选择要导入的 md 文档",
+        initialdir=str(SAMPLE_DIR),
+        filetypes=[("Markdown/文本文档", "*.md *.txt")],
+    )
+    root.destroy()
+    if not paths:
+        return _status_text("未选择文件")
+    notes, added = [], False
+    for p in paths:
         try:
-            text = Path(path).read_text(encoding="utf-8")
+            text = Path(p).read_text(encoding="utf-8")
         except Exception as e:
-            notes.append(f"[ERROR] 读取 {Path(path).name} 失败：{e}")
+            notes.append(f"[ERROR] 读取 {Path(p).name} 失败：{e}")
             continue
-        source = Path(path).stem
-        _, ok, msg = _ingest_text(text, source)
+        _, ok, msg = _ingest_text(text, Path(p).stem)   # source 取文件名（同 step4 ingest 口径）
+        added = added or ok
         notes.append(msg)
-    return _status_text("\n".join(notes)), gr.update(value=None)
-
-
-def ingest_sample():
-    """「导入示例语料」按钮回调：一键导入 step4 已清洗的盐湖股份 3 年年报节选。"""
-    if not SAMPLE_DIR.exists():
-        return _status_text("⚠️ 未找到示例语料目录（step4_rag/sample_reports/），请改用上传按钮"), gr.update()
-    notes = []
-    for f in sorted(SAMPLE_DIR.glob("*.md")):
-        text = f.read_text(encoding="utf-8")
-        _, _, msg = _ingest_text(text, f.stem)        # source 取文件名（同 step4 ingest 口径）
-        notes.append(msg)
-    return _status_text("\n".join(notes)), gr.update()
+    if not added:
+        return _status_text("已导入，无需重复导入")       # 选中的都已在库 → 提示已导入
+    return _status_text("\n".join(notes))
 
 
 def clear_store():
@@ -308,7 +312,7 @@ def respond(message, history):
     if not store.chunks:
         yield history + [
             {"role": "user", "content": message},
-            {"role": "assistant", "content": "⚠️ 向量库为空。请先在左侧上传文档并点「导入向量库」，或点「导入示例语料」。"},
+            {"role": "assistant", "content": "⚠️ 向量库为空。请先在左侧点「导入」选择文档。"},
         ], "", gr.update()
         return
 
@@ -335,27 +339,23 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Mini-RAG · 财报问答") as app:
         gr.Markdown("# Mini-RAG · 财报问答\n把 Step 1-4 的 RAG 套成一个能用的聊天产品。")
         with gr.Row():
-            # 左栏：文档管理（产品化改造③ —— 换文档从改命令变成点按钮）
+            # 左栏：文档管理（产品化改造③ —— 导入语料从敲命令变成点按钮弹框选文件）
             with gr.Column(scale=1):
                 status = gr.Markdown(_status_text())
                 gr.Markdown("---")
-                upload = gr.File(label="上传文档（md / txt，可多选）", file_count="multiple",
-                                 file_types=[".md", ".txt"])
-                btn_ingest = gr.Button("导入向量库", variant="primary")
-                btn_sample = gr.Button("导入示例语料（盐湖股份 3 年年报）")
-                btn_clear = gr.Button("清空向量库", variant="stop")
+                btn_import = gr.Button("导入", variant="primary")
+                btn_clear = gr.Button("清空", variant="stop")
             # 右栏：聊天（产品化改造① + ② —— Web 界面 + 流式）
             with gr.Column(scale=2):
                 sources = gr.Markdown(_format_sources([]))
-                chatbot = gr.Chatbot(type="messages", height=460,
+                chatbot = gr.Chatbot(height=460,
                                      placeholder="先在左侧导入文档，然后在这里提问…")
                 msg = gr.Textbox(placeholder="问点关于已导入文档的…（Enter 发送）",
                                  label="问题", scale=4)
                 send = gr.Button("发送", variant="primary", scale=1)
 
         # 事件绑定
-        btn_ingest.click(ingest_files, [upload], [status, upload])
-        btn_sample.click(ingest_sample, [], [status])
+        btn_import.click(ingest_dialog, [], [status])
         btn_clear.click(clear_store, [], [status])
         send_kwargs = dict(fn=respond, inputs=[msg, chatbot], outputs=[chatbot, sources, msg])
         msg.submit(**send_kwargs)
