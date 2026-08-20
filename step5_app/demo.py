@@ -336,8 +336,8 @@ def respond(message, history):
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Mini-RAG · 财报问答") as app:
-        gr.Markdown("# Mini-RAG · 财报问答\n把 Step 1-4 的 RAG 套成一个能用的聊天产品。")
+    with gr.Blocks(title="Mini-RAG · 问答助手") as app:
+        gr.Markdown("# Mini-RAG · 问答助手\n把 Step 1-4 的 RAG 套成一个能用的聊天产品。")
         with gr.Row():
             # 左栏：文档管理（产品化改造③ —— 导入语料从敲命令变成点按钮弹框选文件）
             with gr.Column(scale=1):
