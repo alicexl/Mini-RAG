@@ -199,20 +199,6 @@ def build_context(retrieved: list[tuple[int, float, str]]) -> str:
 
 
 # ================================================================
-# 进程级单例：embedder / splitter / store / generator（教学 demo 单用户，全局共享）
-# ================================================================
-embedder = Embedder()
-splitter = RecursiveTextSplitter(chunk_size=200)
-generator = Generator()
-store = VectorStore()
-if (DATA_DIR / "chunks.json").exists():
-    try:
-        store.load(str(DATA_DIR))
-    except Exception as e:
-        print(f"[WARN] 读回向量库失败（{e}），从空库开始")
-
-
-# ================================================================
 # 本章新东西②：Gradio 回调（文档管理 + 聊天流式）
 # ================================================================
 
@@ -366,6 +352,13 @@ def build_ui() -> gr.Blocks:
 
 
 def main():
+    # 进程级单例：embedder / splitter / store / generator（教学 demo 单用户，全局共享）。
+    # 放在 main 里、key 确认之后初始化：import 本模块零副作用（不读盘、不打日志），
+    # 启动顺序一条线——配置确认 → 初始化 → 建 UI → launch。回调引用的就是这几个模块级名字
+    #（Python 调用时才解析全局名，所以在 main 里 global 赋值即可）。
+    global embedder, splitter, generator, store
+    generator = Generator()
+
     # 启动前确保 chat 模型 key 就位：env/常量都没设 → 交互式问一次；空着就直接退出。
     # 这里在主线程、launch() 之前，终端 stdin 可用（不像 web 请求线程里没 stdin）。
     if not generator.api_key:
@@ -377,6 +370,16 @@ def main():
         if not key:
             raise SystemExit("未提供 API Key，退出")
         generator.api_key = key
+
+    embedder = Embedder()
+    splitter = RecursiveTextSplitter(chunk_size=200)
+    store = VectorStore()
+    if (DATA_DIR / "chunks.json").exists():
+        try:
+            store.load(str(DATA_DIR))
+        except Exception as e:
+            print(f"[WARN] 读回向量库失败（{e}），从空库开始")
+
     app = build_ui()
     print("=" * 60)
     print(f"Mini-RAG 聊天应用  ·  检索 {embedder.model}  ·  生成 {generator.model}")
