@@ -10,8 +10,8 @@
 启动:
     # 先备好两个外部依赖（同 step4）：
     #   · Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用）
-    #   · 一个 chat 模型 API Key：set ANTHROPIC_API_KEY=xxx（智谱 glm-5.2 网关）
-    PYTHONUTF8=1 python step5_app/demo.py
+    #   · 一个 chat 模型 API Key：set ANTHROPIC_API_KEY=xxx（智谱 glm-5.3 网关）
+    python -X utf8 step5_app/demo.py
     # → 浏览器打开 http://127.0.0.1:7860
 
     # 换 chat 模型/网关用 ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖（同 step4）。
@@ -153,7 +153,7 @@ class VectorStore:
 API_KEY = ""   # 没设 env 时兜底（推荐用环境变量 ANTHROPIC_API_KEY，免改代码）
 
 _CHAT_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
-_CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.2")
+_CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.3")
 
 
 class Generator:
@@ -364,7 +364,7 @@ def main():
     if not generator.api_key:
         print("=" * 60)
         print("检测到尚未配置 chat 模型的 API Key")
-        print("（智谱 glm-5.2，bigmodel.cn 生成，id.secret 格式）")
+        print("（智谱 glm-5.3，bigmodel.cn 生成，id.secret 格式）")
         print("持久化方式：设置环境变量 ANTHROPIC_API_KEY，或改 demo.py 顶部 API_KEY 常量")
         key = input("请输入 API Key（直接回车则退出）: ").strip()
         if not key:

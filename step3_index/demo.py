@@ -7,7 +7,7 @@
   串成一条完整的检索链路
 
 运行:
-    PYTHONUTF8=1 python step3_index/demo.py
+    python -X utf8 step3_index/demo.py
 
 依赖 Ollama 已启动 + qwen3-embedding:0.6b 已下载（同 step1）。
 """

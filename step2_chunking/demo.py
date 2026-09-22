@@ -7,7 +7,7 @@
 - overlap（重叠）：怎么避免在切分边界丢信息
 
 运行:
-    PYTHONUTF8=1 python step2_chunking/demo.py
+    python -X utf8 step2_chunking/demo.py
 """
 
 

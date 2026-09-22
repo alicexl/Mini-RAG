@@ -7,14 +7,14 @@
 
 用法（两个命令，按用户场景划分）:
     # ① 导入单个文档：拆分 + 向量化 + 入库（幂等：同来源已导入则跳过，来源名取文件名）
-    PYTHONUTF8=1 python step4_rag/demo.py ingest <文档路径>
+    python -X utf8 step4_rag/demo.py ingest <文档路径>
 
     # ② 启动交互式问答 terminal（quit / exit 退出）
-    PYTHONUTF8=1 python step4_rag/demo.py chat
+    python -X utf8 step4_rag/demo.py chat
 
 依赖:
 - Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用，同 step1/3）
-- 一个 chat 模型。默认走智谱 GLM 的 Anthropic 兼容网关（glm-5.2）。API Key 三种配置：
+- 一个 chat 模型。默认走智谱 GLM 的 Anthropic 兼容网关（glm-5.3）。API Key 三种配置：
   ① 环境变量 ANTHROPIC_API_KEY（推荐）；② 改 demo.py 顶部 API_KEY 常量；
   ③ 都没设 → 运行时交互式输入（仅本次运行有效）。换模型/网关用
   ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
@@ -175,7 +175,7 @@ class VectorStore:
 API_KEY = ""
 
 _CHAT_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
-_CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.2")
+_CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.3")
 
 
 class Generator:

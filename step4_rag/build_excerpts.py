@@ -9,7 +9,7 @@
     "营业收入（元）" → "营业收入（元）：2024年 = 15,134,119,500.89；2023年 = 21,578,504,361.18（同比 -29.86%）"
 每行自带年份上下文，切到哪个 chunk 语义都完整。没有年份表头的表格原样保留。
 
-运行: PYTHONUTF8=1 python step4_rag/build_excerpts.py
+运行: python -X utf8 step4_rag/build_excerpts.py
 """
 
 import os
