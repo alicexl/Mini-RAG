@@ -199,7 +199,8 @@ class Generator:
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-        return resp.content[0].text
+        # glm-5.3 会在 content 里混 ThinkingBlock（思考过程），只取文本块拼接
+        return "".join(b.text for b in resp.content if b.type == "text")
 
 
 # ===== RAG：把「检索」和「生成」拼起来 =====
