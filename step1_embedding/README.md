@@ -1,8 +1,22 @@
-# Step 1 讲稿：文本向量化 —— 理解 Embedding
+# Step 1 — 文本向量化：理解 Embedding
+
+> RAG 的语义地基：把文本变成 1024 维向量，语义相近则坐标相近，余弦相似度算远近。
+> 五步路径与各步概览见仓库根目录 [README](../README.md)。
+
+## 快速开始
+
+前提：[Ollama](https://ollama.com) 已启动（不同系统/环境的启动方式不同，Windows 可用仓库上级目录的 `start_ollama_cpu.bat`（即 `../start_ollama_cpu.bat`），Linux/macOS 通常是 `ollama serve`）。
+
+```bash
+ollama pull qwen3-embedding:0.6b    # 拉取模型（首次需要）
+python -X utf8 step1_embedding/demo.py
+```
+
+纯本地检索、无需 API Key。
 
 ---
 
-## 一、从一个文档检索问题开始
+## 1. 从一个文档检索问题开始
 
 假设你在文档库里搜"盐湖股份2024年赚了多少钱"，但文档里写的是"盐湖股份2024年营业收入150亿元"。如果检索只按字面匹配——拿"赚""多少钱"这些字去比对——它根本找不到，因为"赚"字压根没出现。
 
@@ -12,7 +26,7 @@
 
 ---
 
-## 二、Embedding 怎么工作
+## 2. Embedding 怎么工作
 
 ### 语义坐标：给文本一个"位置"
 
@@ -149,17 +163,7 @@ return dot / (norm_a * norm_b)                 # 点积 / (A的长度 × B的长
 
 ---
 
-## 三、动手试试——看数据说话
-
-运行 demo 前，先确认 Ollama 服务已在运行（不同系统/环境的启动方式不同，Windows 可用仓库上级目录的 `start_ollama_cpu.bat`（即 `../start_ollama_cpu.bat`），Linux/macOS 通常是 `ollama serve`），再确认模型已下载：
-
-```bash
-# 拉取模型（首次需要）
-ollama pull qwen3-embedding:0.6b
-
-# 运行 demo
-python step1_embedding/demo.py
-```
+## 3. 动手试试——看数据说话
 
 4 段文本，语义上有近有远：
 
@@ -205,7 +209,7 @@ python step1_embedding/demo.py
 
 ---
 
-## 四、Embedding 的定位
+## 4. Embedding 的定位
 
 理解了 Embedding 本身，把它和两个"邻居"放一起对比，定位才清晰：一是传统检索（同样是"找文档"，但路线不同），二是 LLM（同样是"处理文本"，但角色不同）。
 
@@ -242,6 +246,6 @@ LLM 判断一篇文档相不相关，得真正读懂它——逐 token 算一遍
 
 ## 下一步
 
-[Step 2：文档分块 →](../step2_chunking/讲稿.md)
+[Step 2：文档分块 →](../step2_chunking/README.md)
 
 但真实文档不是一句话——一篇几十页的 PDF，为什么不能直接整体向量化、非得切成一小块一小块的 chunk？真要切的话，又该怎么切，才能既保留语义完整、又方便检索？

@@ -1,15 +1,27 @@
-# Step 5 讲稿：套一个聊天界面 —— 把 RAG 做成产品
+# Step 5 — 套一个聊天界面：把 RAG 做成产品
+
+> Gradio Web 界面 + 流式生成 + 文档管理面板——浏览器打开就能问，答案一个字一个字往外吐。
+> 五步路径与各步概览见仓库根目录 [README](../README.md)。
+
+## 快速开始
+
+前提同 [Step 4](../step4_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成远程）。注意 Web 服务没有 stdin，Key 只认环境变量 / 常量（见 §2 改造②），没配会在生成时报错、由界面显示在气泡里：
+
+```bash
+set ANTHROPIC_API_KEY=你的智谱key    # macOS/Linux 用 export
+python -X utf8 step5_app/demo.py    # → 浏览器自动打开 http://127.0.0.1:7860
+```
 
 ---
 
-## 一、为什么要加界面，为什么选 Gradio
+## 1. 为什么要加界面，为什么选 Gradio
 
 前四步我们手里已经有了一个完整的 RAG：检索 → 拼 context → system 约束 → LLM 生成。但它跑在命令行里（`step4_rag/demo.py chat`），作为 demo 够清楚，作为「产品」有两个硬伤：
 
 - **上手门槛**：想用它的人得会开终端、装 Python、跑 `ingest`、再跑 `chat`——普通人到「打开终端」这一步就被劝退。
 - **交互体验**：`Generator.answer()` 是阻塞的，问一个问题要干等几秒才有整段答案，没有任何「它在想」的反馈——不像 ChatGPT 那样一个字一个字往外吐。
 
-这一章就是给 RAG 套一层 Web 聊天界面：**浏览器打开就能问、答案流式往外吐、左侧点「导入」从弹出的文件框里选文档入库**——降低上手门槛，提升交互体验。
+这一步就是给 RAG 套一层 Web 聊天界面：**浏览器打开就能问、答案流式往外吐、左侧点「导入」从弹出的文件框里选文档入库**——降低上手门槛，提升交互体验。
 
 界面用什么做？Flask/FastAPI + 前端对一个 demo 来说太重了。**Gradio** 是专为 ML/LLM demo 设计的：纯 Python，几十行就能起一个带交互的网页，自动开浏览器、自动处理前后端通信。
 
@@ -23,9 +35,9 @@
 
 ---
 
-## 二、动手：三个产品化改造
+## 2. 动手：三个产品化改造
 
-RAG 的核心类（`Embedder` / `RecursiveTextSplitter` / `VectorStore`）和 `SYSTEM_PROMPT` / `build_context` 都和 step4 一样，本章不动它们（demo.py 里原样内联）。本章新增的代码就两类：**流式的 Generator** 和 **Gradio 的界面层**。
+RAG 的核心类（`Embedder` / `RecursiveTextSplitter` / `VectorStore`）和 `SYSTEM_PROMPT` / `build_context` 都和 step4 一样，本 step 不动它们（demo.py 里原样内联）。新增的代码就两类：**流式的 Generator** 和 **Gradio 的界面层**。
 
 ### 改造①：Web 聊天界面
 
@@ -164,14 +176,14 @@ python -X utf8 step5_app/demo.py
 
 ---
 
-## 三、五步走完
+## 3. 五步走完
 
 回头看这五步：
 
-1. **[Embedding](../step1_embedding/讲稿.md)**：文本变向量，余弦相似度找语义接近。
-2. **[分块](../step2_chunking/讲稿.md)**：长文档切成 chunk，递归切分保语义边界。
-3. **[向量库](../step3_index/讲稿.md)**：JSON + numpy 存 chunk 和向量，从零实现检索。
-4. **[完整 RAG](../step4_rag/讲稿.md)**：检索 + 拼 context + system 约束 + LLM 生成，闭环 + 防幻觉两道关。
-5. **聊天界面**（本章）：套 Gradio，流式 + 文档管理。UI 仅为产品化演示，RAG 内核仍是 step4 的朴素实现。
+1. **[Embedding](../step1_embedding/README.md)**：文本变向量，余弦相似度找语义接近。
+2. **[分块](../step2_chunking/README.md)**：长文档切成 chunk，递归切分保语义边界。
+3. **[向量库](../step3_index/README.md)**：JSON + numpy 存 chunk 和向量，从零实现检索。
+4. **[完整 RAG](../step4_rag/README.md)**：检索 + 拼 context + system 约束 + LLM 生成，闭环 + 防幻觉两道关。
+5. **聊天界面**（本 step）：套 Gradio，流式 + 文档管理。UI 仅为产品化演示，RAG 内核仍是 step4 的朴素实现。
 
 一套朴素 RAG 的骨架就这么搭起来了。它每个零件都最简、都看得见——embedding 是一次 HTTP 调用、分块是递归切分隔符、向量库是余弦点积、检索是 Top-K、生成是拼 prompt 喂 LLM。没有黑盒。
