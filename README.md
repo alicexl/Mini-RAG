@@ -10,7 +10,7 @@
 | 2 | **分块**：长文档切 chunk，递归切分保语义边界 + overlap | [step2_chunking/README.md](step2_chunking/README.md) |
 | 3 | **向量库**：JSON + numpy 存 chunk 和向量，从零实现检索 | [step3_index/README.md](step3_index/README.md) |
 | 4 | **完整 RAG**：检索 + 拼 context + system 约束 + 生成，防幻觉两道关 | [step4_rag/README.md](step4_rag/README.md) |
-| 5 | **聊天界面**：套 Gradio，流式生成 + 文档管理 | [step5_app/README.md](step5_app/README.md) |
+| 5 | **聊天界面**：Flask 手写 Web 界面，SSE 流式 + 文档上传 | [step5_app/README.md](step5_app/README.md) |
 
 每个 `demo.py` 自包含、可独立运行，不依赖共享库。
 

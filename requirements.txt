@@ -1,4 +1,4 @@
 requests
 numpy
 anthropic
-gradio>=6.0
+flask

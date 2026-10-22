@@ -1,178 +1,206 @@
-# Step 5 — 套一个聊天界面：把 RAG 做成产品
+# Step 5 — 手写一个 Web 聊天界面：把 RAG 做成产品
 
-> Gradio Web 界面 + 流式生成 + 文档管理面板——浏览器打开就能问，答案一个字一个字往外吐。
+> Flask Web 界面 + SSE 流式生成 + 文档上传——浏览器打开就能问，答案一个字一个字往外吐。
 > 五步路径与各步概览见仓库根目录 [README](../README.md)。
 
 ## 快速开始
 
-前提同 [Step 4](../step4_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成远程）。注意 Web 服务没有 stdin，Key 只认环境变量 / 常量（见 §2 改造②），没配会在生成时报错、由界面显示在气泡里：
+前提同 [Step 4](../step4_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成远程）。注意 Web 请求处理里没有 stdin，Key 只认环境变量 / 常量 / 启动时的交互确认（见 §2 改造②），没配会在生成时报错、以 SSE error 事件显示在聊天气泡里：
 
 ```bash
 set ANTHROPIC_API_KEY=你的智谱key    # macOS/Linux 用 export
 python -X utf8 step5_app/demo.py    # → 浏览器自动打开 http://127.0.0.1:7860
 ```
 
+端口默认 7860，被占用时改 demo.py 底部 `app.run` 的 `port`。
+
 ---
 
-## 1. 为什么要加界面，为什么选 Gradio
+## 1. 为什么要加界面，为什么手写 Flask
 
 前四步我们手里已经有了一个完整的 RAG：检索 → 拼 context → system 约束 → LLM 生成。但它跑在命令行里（`step4_rag/demo.py chat`），作为 demo 够清楚，作为「产品」有两个硬伤：
 
 - **上手门槛**：想用它的人得会开终端、装 Python、跑 `ingest`、再跑 `chat`——普通人到「打开终端」这一步就被劝退。
 - **交互体验**：`Generator.answer()` 是阻塞的，问一个问题要干等几秒才有整段答案，没有任何「它在想」的反馈——不像 ChatGPT 那样一个字一个字往外吐。
 
-这一步就是给 RAG 套一层 Web 聊天界面：**浏览器打开就能问、答案流式往外吐、左侧点「导入」从弹出的文件框里选文档入库**——降低上手门槛，提升交互体验。
+这一步就是给 RAG 套一层 Web 聊天界面：**浏览器打开就能问、答案流式往外吐、左侧点「导入」从浏览器文件框里选文档入库**——降低上手门槛，提升交互体验。
 
-界面用什么做？Flask/FastAPI + 前端对一个 demo 来说太重了。**Gradio** 是专为 ML/LLM demo 设计的：纯 Python，几十行就能起一个带交互的网页，自动开浏览器、自动处理前后端通信。
+界面怎么做？两条路：
 
-它的核心是 `gr.Blocks`，三件套：
+- **demo 框架**（Gradio / Streamlit）：纯 Python 几十行就能起一个带交互的网页。最快，但路由、前后端通信、流式推送、状态管理全被框架收进黑盒——对一个立身之本是「没有黑盒」的教学仓，等于在最后一步把前四步攒下的透明度全丢了。
+- **手写**（Flask + 原生 HTML/JS）：多写一两百行，换来 Web 层完全摊开——URL 怎么映射到 Python 函数、静态页怎么被服务出去、流式答案怎么从后端一路推到浏览器的聊天气泡、文件怎么从浏览器传到服务端，每一环都看得见。
 
-- **布局**：`gr.Row()` / `gr.Column()` 像搭积木一样摆组件（左右分栏、上下堆叠）。
-- **组件**：`gr.Chatbot`（聊天气泡）、`gr.Textbox`（输入框）、`gr.Button`（按钮）、`gr.Markdown`（文字）。每个组件就是一个可视化的数据容器。
-- **事件**：`组件.事件(回调函数, inputs=[...], outputs=[...])`——某个组件上发生了动作（按下回车、点按钮），就调一个 Python 函数，把指定的输入组件喂给它，把返回值写回指定的输出组件。
+本 step 选手写。Flask 是 Python Web 生态的「最小公约数」，核心概念就四个：
 
-一句话：**布局摆组件，事件把组件和 Python 函数连起来**。后端就是普通 Python 函数。
+| 概念 | 一句话 | 在 demo.py 里 |
+|---|---|---|
+| 路由（route） | 把 URL + 方法映射到一个 Python 函数 | `@app.post("/api/chat")` |
+| 视图函数 | 被路由调用的函数，返回 HTML / JSON / 流 | `def chat(): ... return Response(...)` |
+| 静态文件 | 浏览器加载的页面本身 | `send_from_directory(STATIC_DIR, "index.html")` |
+| 请求对象 | 请求里带的东西（JSON 体 / 上传的文件） | `request.get_json()` / `request.files` |
+
+整条链路就三段，各段都能单独抠出来看：
+
+```
+浏览器（static/index.html：渲染界面 + 发请求 + 解析 SSE）
+   │  HTTP
+Flask Web 层（demo.py：5 个路由）
+   │  函数调用
+RAG 内核（step4 原样：检索 → 拼 context → system 约束 → 生成）
+```
 
 ---
 
 ## 2. 动手：三个产品化改造
 
-RAG 的核心类（`Embedder` / `RecursiveTextSplitter` / `VectorStore`）和 `SYSTEM_PROMPT` / `build_context` 都和 step4 一样，本 step 不动它们（demo.py 里原样内联）。新增的代码就两类：**流式的 Generator** 和 **Gradio 的界面层**。
+RAG 的核心类（`Embedder` / `RecursiveTextSplitter` / `VectorStore`）和 `SYSTEM_PROMPT` / `build_context` 都和 step4 一样，本 step 不动它们（demo.py 里原样内联）。新增的代码就两类：**流式的 Generator** 和 **Flask 的 Web 层**。
 
-### 改造①：Web 聊天界面
+### 改造①：Web 聊天界面（路由 + 静态页）
 
-用 `Blocks` 搭一个左右分栏的页面——左边文档管理，右边聊天：
+Web 层一共 5 个路由，一张表看完：
 
-```python
-with gr.Blocks(title="Mini-RAG · 问答助手") as app:
-    gr.Markdown("# Mini-RAG · 问答助手")
-    with gr.Row():
-        with gr.Column(scale=1):          # 左栏：文档管理
-            status = gr.Markdown(_status_text())
-            btn_import = gr.Button("导入", variant="primary")
-            btn_clear = gr.Button("清空", variant="stop")
-        with gr.Column(scale=2):          # 右栏：聊天
-            sources = gr.Markdown(_format_sources([]))
-            chatbot = gr.Chatbot(height=460)              # 聊天气泡区
-            msg = gr.Textbox(placeholder="提问…（Enter 发送）")
-            send = gr.Button("发送", variant="primary")
-```
-
-`gr.Chatbot` 是「messages」格式——里面装的是 `[{"role": "user", "content": ...}, {"role": "assistant", "content": ...}, ...]`，左右气泡自动分边。`msg.submit(...)` 把输入框的回车连到回调：
+| 方法 + 路径 | 干什么 |
+|---|---|
+| `GET /` | 返回 `static/index.html`（聊天页面） |
+| `GET /api/status` | 库状态 JSON：chunk 数 + 已导入文档清单 |
+| `POST /api/upload` | multipart 文件上传 → 切块 / 向量化 / 入库（幂等） |
+| `POST /api/clear` | 清空向量库 |
+| `POST /api/chat` | SSE 流式回答（见改造②） |
 
 ```python
-msg.submit(fn=respond, inputs=[msg, chatbot], outputs=[chatbot, sources, msg])
+app = Flask(__name__, static_folder=None)   # 关掉 Flask 自带的 /static/<文件> 路由
+
+@app.get("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
 ```
 
-输入框一回车，就把「当前问题 + 聊天历史」喂给 `respond`，把它返回的新历史写回 `chatbot`、检索来源写回 `sources`、把输入框 `msg` 清空。
+`static_folder=None` 值得一提：Flask 默认会把 `static/` 目录自动挂到 `/static/<文件名>`。这里关掉默认行为、用 `send_from_directory` 手动返回页面——静态文件是怎么被服务的，亲眼看到这一次，后面再用默认行为就知其所以然。
 
-### 改造②：流式生成
+前端就一个 `static/index.html`：无框架、无构建工具，CSS/JS 全内嵌。布局左右分栏——左栏文档管理（库状态 + 导入 / 清空），右栏聊天（检索来源面板 + 聊天气泡 + 输入框）。所有动态内容只用 `textContent` 写入（不走 `innerHTML`），chunk 原文按纯文本显示，顺带天然免疫 XSS。
 
-产品体验的关键一步。step4 的 `Generator.answer()` 是一次性返回整段答案；这里改成**流式**——用 anthropic SDK 的 `messages.stream`，拿到一个流，逐片 `yield` 文本增量：
+### 改造②：流式生成（SSE）
+
+`Generator.answer_stream` 和上一形态一样：用 SDK 的 `messages.stream` 拿到一个流，逐片 `yield` 文本增量。真正的新问题是：**HTTP 响应怎么「分多次送」？** Gradio 时代回调写成生成器界面就自动刷新；Flask 没有这层魔法，答案是一次 HTTP 响应送完的——那就让这一次响应本身变成流。这正是 **SSE（Server-Sent Events）**：`Content-Type: text/event-stream` + 一个生成器，Flask 每 `yield` 一段就往 socket 写一段。
+
+协议自己定，四种事件，每帧两行头 + 空行结尾：
+
+| 事件 | data | 时机 |
+|---|---|---|
+| `sources` | 本次 Top-3 检索来源 | 先亮来源 |
+| `delta` | `{"text": "一小片答案"}` | 每个增量一帧 |
+| `done` | `{}` | 回答结束 |
+| `error` | `{"message": "..."}` | 生成中失败（无 Key / SDK 异常） |
 
 ```python
-class Generator:
-    def answer_stream(self, system, messages, max_tokens=2048):
-        client = Anthropic(base_url=self.base_url, api_key=self.api_key)
-        with client.messages.stream(
-            model=self.model, max_tokens=max_tokens, system=system, messages=messages,
-        ) as stream:
-            for text in stream.text_stream:        # text_stream 逐片吐文本增量
-                yield text
+def stream():
+    yield _sse("sources", {"sources": sources_payload})
+    try:
+        for delta in generator.answer_stream(SYSTEM_PROMPT, llm_messages):
+            yield _sse("delta", {"text": delta})
+        yield _sse("done", {})
+    except Exception as e:
+        yield _sse("error", {"message": f"生成失败：{e}\n请确认 ANTHROPIC_API_KEY 已配置"})
+
+return Response(stream(), mimetype="text/event-stream",
+                headers={"Cache-Control": "no-cache"})
 ```
 
-和 step4 的 `answer()` 比，差别只在 `messages.stream` + `yield`——模型一边生成一边往外送，不用等整段拼好。注意 key 的处理也变了：step4 没 key 会 `input()` 交互式问；Web 服务没有 stdin，这里改为只认环境变量/常量，没配就在生成时抛错、由界面接住显示在气泡里（`respond` 里 `try/except`）。
+错误分两层，这是个值得记住的 Web 实践：**请求级校验**（空消息 / 空库）走 `400 + JSON`——那时响应头还没定，可以随便返；**流一旦开始**（响应头已是 `text/event-stream`）中途出错就只能往下写 SSE `error` 事件，前端把它显示在助手气泡里。
 
-Gradio 的流式套路：**回调函数本身写成生成器，每 `yield` 一次界面就刷新一次**。`respond` 把空助手气泡先亮出来，然后边收流式片段边往里填：
+前端消费 SSE 用的是 `fetch` 而不是浏览器原生的 `EventSource`——后者只支持 GET，我们要 POST 请求体。解析器核心就十五行：`resp.body.getReader()` 逐块读字节 → `TextDecoder` 转文本 → 按**空行**切帧 → 帧内取 `event:` / `data:` 两行：
+
+```js
+const reader = resp.body.getReader();
+const decoder = new TextDecoder();
+let buf = "";
+while (true) {
+  const {done, value} = await reader.read();
+  if (done) break;
+  buf += decoder.decode(value, {stream: true});
+  let cut;
+  while ((cut = buf.indexOf("\n\n")) >= 0) {      // SSE 帧以空行分隔
+    const frame = buf.slice(0, cut);
+    buf = buf.slice(cut + 2);
+    /* 解析 event:/data: → 更新来源面板 / 助手气泡 / history */
+  }
+}
+```
+
+**多轮对话的状态放哪？** 前端持有一个 `history` 数组，每次请求随 body 带上来；服务端不存任何会话状态（无状态服务，重启不丢对话）。把「已有历史 + 本轮 user（带参考资料）」一起喂 LLM，模型就能接住「那 2023 年呢？」这种追问；检索仍只针对最新问题（朴素 RAG 的简化）。这也是聊天框架的 Chatbot 组件替你藏掉的那部分——现在它就摊在你的 index.html 里，~15 行。
+
+> 为什么不用 WebSocket？这个场景是「请求小、响应流」的单向推送，SSE 就是纯 HTTP，够用且更简单；WebSocket 的双向能力用不上。顺带一提：LLM API 自家的流式返回（OpenAI / 智谱）走的就是 SSE——这里的做法和生产同构。
+
+### 改造③：文档管理（真上传）
+
+导入语料从「敲命令」变成「点按钮」。页面里一个隐藏的原生文件框（`<input type="file" multiple>`，label 当按钮用），选中文件后前端拼 `FormData` 发 `POST /api/upload`，服务端从 `request.files` 里拿：
 
 ```python
-def respond(message, history):
-    retrieved = store.search(message, embedder, top_k=3)             # 检索
-    context = build_context(retrieved)                               # 增强：拼 context
-    sources_md = _format_sources(retrieved)
-    turned = history + [{"role": "user", "content": message},
-                        {"role": "assistant", "content": ""}]         # 助手气泡先空着
-    yield turned, sources_md, ""                                      # 先亮出问题 + 来源
-
-    for chunk in generator.answer_stream(SYSTEM_PROMPT,              # 流式生成
-                                         history + [{"role": "user", "content": …}]):
-        turned[-1]["content"] += chunk                               # 边收边填进助手气泡
-        yield turned, sources_md, ""                                 # 每次 yield 界面刷新
+files = request.files.getlist("files")     # multipart 里的文件列表
+for f in files:
+    source = Path(f.filename).stem          # 同 step4 ingest 口径：source 取文件名
+    text = f.read().decode("utf-8", errors="replace")
+    notes.append(_ingest_text(text, source)[2])
 ```
 
-每收一个片段就 `yield` 一次——用户看到的就是答案一个字一个字长出来。多轮对话也顺手支持了：把**已有历史 + 本轮（带参考资料）**一起塞进 `messages`，模型能接住「那 2023 年呢？」这种追问；检索仍只针对最新问题（朴素 RAG 的简化）。
-
-### 改造③：文档管理面板
-
-导入语料从「敲命令」变成「点按钮」。左栏就两个按钮：「导入」弹一个**系统文件选择框**（默认打开本 step 的 `sample_reports/` 目录，选中的 md/txt 切块入库），「清空」一键清空重来。弹框用的是 Python 自带的 tkinter：
-
-```python
-def ingest_dialog():
-    """「导入」按钮回调：弹系统文件选择框（默认打开 sample_reports/），选中即导入。"""
-    root = tk.Tk()
-    root.withdraw()                    # 不显示主窗口，只要对话框
-    root.attributes("-topmost", True)  # 保证框弹在浏览器前面
-    paths = filedialog.askopenfilenames(
-        initialdir=str(SAMPLE_DIR), filetypes=[("Markdown/文本文档", "*.md *.txt")])
-    root.destroy()
-    if not paths:
-        return _status_text("未选择文件")
-    ...
-```
-
-**注意这个技巧只有本地 demo 才成立——但它也正是没选 `gr.File` 上传的原因**：浏览器的文件框没法预设目录，tkinter 能用 `initialdir` 直开 `sample_reports/`，第一次点「导入」就看到示例年报。代价是，这个框是**服务端 Python 进程**弹的（正常网页的文件框由浏览器弹、选完把文件内容上传上来）：它浏览的是服务端的文件夹，拿到路径直接读。本地跑服务端和浏览器在同一台机器，看不出差别；真部署到远端，点「导入」框会弹在服务器上没人点——那时才需要换回 `gr.File`。
-
-选中的文件逐份喂给 `_ingest_text`（读文本 → 切块 → embedding → 入库，幂等——按文件名判断，已在库就跳过，不重算 embedding）：
+`_ingest_text` 逻辑同 step4：切块 → 向量化 → 入库，幂等——按文件名判断，已在库就跳过，不重算 embedding：
 
 ```python
 def _ingest_text(text, source):
     if any(m.get("source") == source for m in store.metadata):
-        return 0, False, f"[SKIP]「{source}」已在库中"       # 幂等：重复点导入不重算 embedding
-    chunks = splitter.split_text(text)
-    store.add(chunks, embedder, metadata=[{"source": source} for _ in chunks])
-    store.save(str(DATA_DIR))
-    return len(chunks), True, f"[OK]「{source}」+{len(chunks)} 块"
+        return 0, False, f"[SKIP]「{source}」已在库中"
+    ...
 ```
 
-选中的文档全都已在库时，「导入」把结果汇成一句提示「已导入，无需重复导入」。左栏顶上还常驻一个 `_status_text`——显示库里现有多少 chunk、已导入哪些文档，让用户随时知道「这个 RAG 现在知道什么」。
+值得强调的是「真上传」三个字：文件框由**浏览器**弹出（在你自己的电脑上选文件），内容随请求传到服务端——服务端只收内容、不碰服务端文件系统，**本地跑和部署到远端行为完全一致**。demo 框架图省事时常见另一种做法（服务端代码直接弹个框、拿本地路径读文件），本地演示看不出差别，一旦部署到远端服务器，框会弹在服务器上没人点。
 
 ### 跑起来
 
-前提同 step4：Ollama 已启动（qwen3-embedding:0.6b），Key 设成环境变量：
+前提同 step4：Ollama 已启动（qwen3-embedding:0.6b），Key 设成环境变量，然后 `python -X utf8 step5_app/demo.py`。首次启动状态栏是空的；若 `data/` 里留着上次入库的向量库，启动时会直接加载。点「导入」选中 `sample_reports/` 下的三份年报节选（可多选）：
 
 ```
-set ANTHROPIC_API_KEY=你的智谱key
-python -X utf8 step5_app/demo.py
-# → 浏览器自动打开 http://127.0.0.1:7860
+[OK]「盐湖股份2023年年报（节选）」+82 块
+[OK]「盐湖股份2024年年报（节选）」+71 块
+[OK]「盐湖股份2025年年报（节选）」+84 块
 ```
 
-首次启动状态栏是空的（`向量库：0 个 chunk`）；若 `data/` 里留着上次入库的向量库，启动时会直接加载、状态栏显示已有的文档和 chunk 数。点「导入」，在弹出的文件框里选中 `sample_reports/` 下的三份年报节选（可多选）：
-
-```
-向量库：234 个 chunk
-已导入文档：
-- 盐湖股份2023年年报（节选）
-- 盐湖股份2024年年报（节选）
-- 盐湖股份2025年年报（节选）
-```
-
-然后在右栏问「公司2024年赚了多少钱？」——检索来源先亮出来（Top-3，即 LLM 回答里「根据[1]」的出处），紧接着答案开始流式往外吐：
+然后在右栏问「公司2024年经营活动现金流量净额是多少？」——来源面板先亮出来（Top-3，即 LLM 回答里「根据[1]」的出处），紧接着答案开始流式往外吐：
 
 ```
 本次检索来源（Top-3）：
-  1. sim=0.588  盐湖股份2024年年报（节选）  经营活动产生的现金流量净额（元）：2024年 = 7,819,152,860.43…
-  2. sim=0.575  盐湖股份2024年年报（节选）  归属于上市公司股东的净利润（元）：2024年 = 4,663,116,528.38…
-  3. sim=0.572  盐湖股份2024年年报（节选）  总资产（元）：2024年末 = 45,782,850,934.85…
+  [1] sim=0.780  盐湖股份2024年年报（节选）
+  [2] sim=0.778  盐湖股份2024年年报（节选）
+  [3] sim=0.734  盐湖股份2023年年报（节选）
 
 助手（流式）：
-根据[2]，公司2024年归属于上市公司股东的净利润为 **4,663,116,528.38元**（约46.63亿元），较2023年的7,913,614,646.24元同比下降41.07%。
-
-补充相关信息：
-- 扣除非经常性损益后的净利润为 4,400,518,590.09元（约44.01亿元），同比下降49.56%（根据[2]）；
-- 基本每股收益为 0.8812元/股（根据[1]）。
+根据[1]，公司2024年经营活动产生的现金流量净额为 7,819,152,860.43元
+（约78.19亿元），较2023年的12,104,618,721.68元同比下降了35.40%。
 ```
 
-这就是一个「能用」的 RAG 产品了：浏览器打开、弹框选文档、提问、看答案一个字一个字出来、每条答案都能追溯到出自哪份年报的哪个 chunk。整个过程没碰过命令行（除了第一次启动）。
+线路上传的是一帧一帧的 SSE（另一次提问的实测帧节选）：
+
+```
+event: delta
+data: {"text": "资料"}
+
+event: delta
+data: {"text": "中"}
+
+event: delta
+data: {"text": "未"}
+
+...（几十帧）
+
+event: done
+data: {}
+```
+
+顺手看两个边界行为（都是实测）：
+
+- **防幻觉在工作**：问「公司2024年赚了多少钱？」，Top-3 恰好没捞到净利润那个 chunk（现金流、总资产把位置挤掉了），模型如实回答「资料中未直接提及净利润」，转而给出每股收益和经营现金流两个相关指标并标注出处——检索漏了它不编，这正是 step4 防幻觉两道关的产品化表现，也是「朴素 RAG 的边界」的活例子。
+- **空库提问**：`POST /api/chat` 返回 `400 {"error": "向量库为空，请先在左侧导入文档"}`，前端显示成气泡里的 ⚠️ 提示。
+
+这就是一个「能用」的 RAG 产品了：浏览器打开、选文档、提问、看答案一个字一个字出来、每条答案都能追溯到出自哪份年报的哪个 chunk。整个过程没碰过命令行（除了第一次启动）。
 
 ---
 
@@ -184,6 +212,6 @@ python -X utf8 step5_app/demo.py
 2. **[分块](../step2_chunking/README.md)**：长文档切成 chunk，递归切分保语义边界。
 3. **[向量库](../step3_index/README.md)**：JSON + numpy 存 chunk 和向量，从零实现检索。
 4. **[完整 RAG](../step4_rag/README.md)**：检索 + 拼 context + system 约束 + LLM 生成，闭环 + 防幻觉两道关。
-5. **聊天界面**（本 step）：套 Gradio，流式 + 文档管理。UI 仅为产品化演示，RAG 内核仍是 step4 的朴素实现。
+5. **聊天界面**（本 step）：Flask 手写 Web 层，SSE 流式 + 文档上传。UI 仅为产品化演示，RAG 内核仍是 step4 的朴素实现。
 
-一套朴素 RAG 的骨架就这么搭起来了。它每个零件都最简、都看得见——embedding 是一次 HTTP 调用、分块是递归切分隔符、向量库是余弦点积、检索是 Top-K、生成是拼 prompt 喂 LLM。没有黑盒。
+一套朴素 RAG 的骨架就这么搭起来了。它每个零件都最简、都看得见——embedding 是一次 HTTP 调用、分块是递归切分隔符、向量库是余弦点积、检索是 Top-K、生成是拼 prompt 喂 LLM、Web 层是 5 个路由 + 一段 SSE。没有黑盒。

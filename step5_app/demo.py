@@ -1,45 +1,42 @@
-"""Step 5: 套一个 Gradio 聊天界面 —— 把 RAG 做成能用的产品
+"""Step 5: 用 Flask 手写一个 Web 聊天界面 —— 把 RAG 做成能用的产品
 
 学习目标:
-- 把 step4 的命令行 RAG 套成一个 Web 聊天界面（Gradio）
-- 三个产品化改造：① Web 聊天界面 ② 流式生成（答案一个字一个字蹦出来）
-  ③ 文档管理面板（点「导入」弹系统文件框选文档，本地 demo 特有）
+- 把 step4 的命令行 RAG 做成一个 Web 聊天应用（Flask + 原生 HTML/JS，无前端框架）
+- 三个产品化改造：① Web 聊天界面（Flask 路由 + 静态页）
+  ② 流式生成（SSE，答案一个字一个字蹦出来）
+  ③ 文档管理（真 HTTP 文件上传，替代 step4 的命令行 ingest）
 - RAG 的核心链路（检索→拼 context→system 约束→生成）和 step4 完全一样，
-  本章只在外面包一层 UI —— 看清「产品化」到底改了什么、没改什么。
+  本章只在外面包一层 Web —— 看清「产品化」到底改了什么、没改什么。
 
 启动:
     # 先备好两个外部依赖（同 step4）：
     #   · Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用）
     #   · 一个 chat 模型 API Key：set ANTHROPIC_API_KEY=xxx（智谱 glm-5.3 网关）
     python -X utf8 step5_app/demo.py
-    # → 浏览器打开 http://127.0.0.1:7860
+    # → 浏览器自动打开 http://127.0.0.1:7860
 
     # 换 chat 模型/网关用 ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖（同 step4）。
 """
 
 import json
 import os
-import re
-import tkinter as tk
+import threading
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog
 
-import gradio as gr
 import numpy as np
 import requests
 from anthropic import Anthropic
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 # 向量库持久化目录（同 step3/4 的三件套：chunks.json + embeddings.npy + metadata.json）
 DATA_DIR = Path(__file__).parent / "data"
-# 示例语料目录：「导入」弹框的默认打开位置（从 step4 拷来的盐湖股份 3 年年报节选；不锁死，别处的 md/txt 也能选）
-SAMPLE_DIR = Path(__file__).parent / "sample_reports"
 
 
 # ================================================================
 # 复用：Embedder / RecursiveTextSplitter / VectorStore（同 step1/2/3/4，内联以便自包含）
-# 三块逻辑和 step4 一致（省去前面 step 已讲过的 docstring）—— step5 不改 RAG 内核，只在外面包 UI。
+# 三块逻辑和 step4 一致（省去前面 step 已讲过的 docstring）—— step5 不改 RAG 内核，只在外面包 Web。
 # ================================================================
-
 _DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _DEFAULT_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
 
@@ -159,8 +156,9 @@ _CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.3")
 class Generator:
     """流式生成器：answer_stream 把 prompt 喂给 chat 模型，逐片 yield 文本。
 
-    和 step4 的差别只在「流式」：key 不再交互式 input()（Web 服务没有 stdin），
-    改为只认 env / 常量；没配 key 就在生成时抛错，由界面层接住、显示在聊天气泡里。
+    和 step4 的差别只在「流式」：key 不再交互式 input()（Web 请求处理里没有 stdin），
+    改为只认 env / 常量；没配 key 就在生成时抛错，由 Web 层接住、包成 SSE error 事件
+    显示在聊天气泡里（见 /api/chat 的 stream()）。
     """
 
     def __init__(self, base_url: str = _CHAT_BASE_URL, model: str = _CHAT_MODEL):
@@ -183,7 +181,7 @@ class Generator:
 
 
 # ================================================================
-# 复用：SYSTEM_PROMPT + build_context（同 step4）—— RAG 的「增强」内核，UI 不改它
+# 复用：SYSTEM_PROMPT + build_context（同 step4）—— RAG 的「增强」内核，Web 层不改它
 # ================================================================
 SYSTEM_PROMPT = (
     "你是一个严谨的问答助手。只能根据下面【参考资料】里的内容回答用户问题，"
@@ -199,43 +197,31 @@ def build_context(retrieved: list[tuple[int, float, str]]) -> str:
 
 
 # ================================================================
-# 本章新东西②：Gradio 回调（文档管理 + 聊天流式）
+# 本章新东西②：Flask Web 层 —— 静态页 + JSON/SSE 端点
+# static_folder=None：关掉 Flask 自带的 /static/<文件> 路由，页面统一从 / 进
+#（send_from_directory 手动返回，把「静态文件是怎么被服务的」摊开来看）
 # ================================================================
+STATIC_DIR = Path(__file__).parent / "static"
 
-def _status_text(note: str | None = None) -> str:
+app = Flask(__name__, static_folder=None)
+
+
+@app.get("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.get("/api/status")
+def status():
     """左栏库状态：现有多少 chunk、已导入哪些文档（按来源去重）。"""
-    n = len(store.chunks)
-    sources = sorted({m.get("source", "?") for m in store.metadata})
-    src_lines = "\n".join(f"- {s}" for s in sources) or "_(空，请点「导入」选择文档)_"
-    out = f"**向量库**：{n} 个 chunk\n\n**已导入文档**：\n{src_lines}"
-    if note:
-        out += f"\n\n_{note}_"
-    return out
-
-
-def _md_escape(s: str) -> str:
-    """转义 Markdown 语法字符，让 chunk 原文按纯文本显示
-    （否则原文里的 "## 标题" 会被渲染成大号标题、"*重点*" 变斜体，字号错乱）。"""
-    return re.sub(r"([#*_`~|>\[\]()!\\])", r"\\\1", s)
-
-
-def _format_sources(retrieved: list[tuple[int, float, str]]) -> str:
-    """右栏检索来源：把本次 Top-K 列成带相似度和出处的清单（即 LLM 回答里「根据[1]」的出处）。
-    标号单独一行，预览放进引用块（自带缩进 + 换行），条目之间空行隔开。"""
-    if not retrieved:
-        return "_(提问后，这里显示本次检索的来源 [1][2][3] 及出处文件)_"
-    parts = ["**本次检索来源（Top-3，即 LLM 回答里「根据[1]」的出处）**："]
-    for i, (idx, sim, chunk) in enumerate(retrieved, 1):
-        src = store.metadata[idx].get("source", "?")
-        preview = chunk.replace("\n", " ").strip()
-        if len(preview) > 80:
-            preview = preview[:80] + "…"
-        parts.append(f"**[{i}]** `sim={sim:.3f}` · **{src}**\n\n> {_md_escape(preview)}")
-    return "\n\n".join(parts)
+    return jsonify(
+        chunks=len(store.chunks),
+        documents=sorted({m.get("source", "?") for m in store.metadata}),
+    )
 
 
 def _ingest_text(text: str, source: str) -> tuple[int, bool, str]:
-    """切块 + 向量化 + 入库一条文档。幂等：source 已在库则跳过。返回 (块数, 是否新增, 提示)。"""
+    """切块 + 向量化 + 入库一份文档。幂等：source 已在库则跳过。返回 (块数, 是否新增, 提示)。"""
     if any(m.get("source") == source for m in store.metadata):
         return 0, False, f"[SKIP]「{source}」已在库中"
     chunks = splitter.split_text(text)
@@ -244,40 +230,24 @@ def _ingest_text(text: str, source: str) -> tuple[int, bool, str]:
     return len(chunks), True, f"[OK]「{source}」+{len(chunks)} 块"
 
 
-def ingest_dialog():
-    """「导入」按钮回调：弹系统文件选择框（默认打开 sample_reports/），选中即导入。
-
-    本地 demo 限定：服务端和浏览器在同一台机器，服务端弹的框用户才看得见——
-    真部署到远端服务器，框会弹在服务器上没人点（产品化边界，见本目录 README）。
-    """
-    root = tk.Tk()
-    root.withdraw()                    # 不显示主窗口，只要对话框
-    root.attributes("-topmost", True)  # 保证框弹在浏览器前面，不被挡住
-    paths = filedialog.askopenfilenames(
-        title="选择要导入的 md 文档",
-        initialdir=str(SAMPLE_DIR),
-        filetypes=[("Markdown/文本文档", "*.md *.txt")],
-    )
-    root.destroy()
-    if not paths:
-        return _status_text("未选择文件")
-    notes, added = [], False
-    for p in paths:
-        try:
-            text = Path(p).read_text(encoding="utf-8")
-        except Exception as e:
-            notes.append(f"[ERROR] 读取 {Path(p).name} 失败：{e}")
-            continue
-        _, ok, msg = _ingest_text(text, Path(p).stem)   # source 取文件名（同 step4 ingest 口径）
-        added = added or ok
-        notes.append(msg)
-    if not added:
-        return _status_text("已导入，无需重复导入")       # 选中的都已在库 → 提示已导入
-    return _status_text("\n".join(notes))
+@app.post("/api/upload")
+def upload():
+    """「导入」端点：multipart 真上传——文件由浏览器文件框选出、内容随请求发上来，
+    服务端只收内容、不碰服务端文件系统（本地 / 远端部署行为一致）。"""
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify(error="未收到文件（multipart 字段名须为 files）"), 400
+    notes = []
+    for f in files:
+        source = Path(f.filename).stem        # 同 step4 ingest 口径：source 取文件名（去扩展名）
+        text = f.read().decode("utf-8", errors="replace")
+        notes.append(_ingest_text(text, source)[2])
+    return jsonify(chunks=len(store.chunks), notes=notes)
 
 
-def clear_store():
-    """「清空向量库」按钮回调。"""
+@app.post("/api/clear")
+def clear():
+    """「清空」端点：内存清零 + 删掉 data/ 落盘三件套。"""
     store.chunks, store.metadata, store.vectors = [], [], None
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for f in DATA_DIR.glob("*"):
@@ -285,82 +255,63 @@ def clear_store():
             f.unlink()
         except OSError:
             pass
-    return _status_text("已清空向量库")
+    return jsonify(chunks=0, documents=[])
 
 
-def respond(message, history):
-    """聊天 submit 回调（生成器 → 流式）：检索 → 拼 context → 喂 LLM 流式生成。
-    每一 yield 刷新 (chatbot, sources_md, msg)：chatbot 边收边显，msg 清空输入框。"""
-    message = (message or "").strip()
+def _sse(event: str, data: dict) -> str:
+    """SSE 帧：event 名 + JSON data 两行，空行结尾（前端按空行切帧）。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/chat")
+def chat():
+    """聊天端点。错误分两层：请求级校验（空消息 / 空库）走 400 JSON——那时响应头还没定，
+    可以随便返；流一旦开始（响应头已是 text/event-stream）中途出错就只能往下写
+    SSE error 事件，前端把它显示在助手气泡里。"""
+    body = request.get_json(silent=True) or {}
+    message = str(body.get("message", "")).strip()
+    history = body.get("history") or []
     if not message:
-        yield history, _format_sources([]), gr.update()
-        return
+        return jsonify(error="message 不能为空"), 400
     if not store.chunks:
-        yield history + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": "⚠️ 向量库为空。请先在左侧点「导入」选择文档。"},
-        ], "", gr.update()
-        return
+        return jsonify(error="向量库为空，请先在左侧导入文档"), 400
 
     retrieved = store.search(message, embedder, top_k=3)             # 检索
     context = build_context(retrieved)                               # 增强①：拼 context
-    sources_md = _format_sources(retrieved)
     user_msg = f"【参考资料】\n{context}\n\n【用户问题】\n{message}"
-
-    # 把「已有对话历史 + 本轮 user（带参考资料）」一起喂给 LLM —— 多轮里能接住追问
+    # 把「前端带上来的对话历史 + 本轮 user（带参考资料）」一起喂给 LLM —— 多轮里能接住追问
     llm_messages = history + [{"role": "user", "content": user_msg}]
-    turned = history + [{"role": "user", "content": message}, {"role": "assistant", "content": ""}]
-    yield turned, sources_md, ""                                      # 先亮出问题 + 来源，助手气泡先空着
+    sources_payload = [
+        {"i": i, "sim": round(sim, 3),
+         "source": store.metadata[idx].get("source", "?"),
+         "preview": chunk.replace("\n", " ").strip()[:80]}
+        for i, (idx, sim, chunk) in enumerate(retrieved, 1)
+    ]
 
-    try:
-        for chunk in generator.answer_stream(SYSTEM_PROMPT, llm_messages):   # 增强② + 生成（流式）
-            turned[-1]["content"] += chunk
-            yield turned, sources_md, ""
-    except Exception as e:
-        turned[-1]["content"] = f"⚠️ 生成失败：{e}\n请确认 chat 模型鉴权已配置（ANTHROPIC_API_KEY）"
-        yield turned, sources_md, ""
+    def stream():
+        yield _sse("sources", {"sources": sources_payload})          # 先亮来源
+        try:
+            for delta in generator.answer_stream(SYSTEM_PROMPT, llm_messages):
+                yield _sse("delta", {"text": delta})                 # 每个 LLM 增量一帧
+            yield _sse("done", {})
+        except Exception as e:
+            yield _sse("error", {"message": f"生成失败：{e}\n请确认 chat 模型鉴权已配置（ANTHROPIC_API_KEY）"})
 
-
-def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Mini-RAG · 问答助手") as app:
-        gr.Markdown("# Mini-RAG · 问答助手\n把 Step 1-4 的 RAG 套成一个能用的聊天产品。")
-        with gr.Row():
-            # 左栏：文档管理（产品化改造③ —— 导入语料从敲命令变成点按钮弹框选文件）
-            with gr.Column(scale=1):
-                status = gr.Markdown(_status_text())
-                gr.Markdown("---")
-                btn_import = gr.Button("导入", variant="primary")
-                btn_clear = gr.Button("清空", variant="stop")
-            # 右栏：聊天（产品化改造① + ② —— Web 界面 + 流式）
-            with gr.Column(scale=2):
-                sources = gr.Markdown(_format_sources([]))
-                chatbot = gr.Chatbot(height=460,
-                                     placeholder="先在左侧导入文档，然后在这里提问…")
-                msg = gr.Textbox(placeholder="问点关于已导入文档的…（Enter 发送）",
-                                 label="问题", scale=4)
-                send = gr.Button("发送", variant="primary", scale=1)
-
-        # 事件绑定
-        btn_import.click(ingest_dialog, [], [status])
-        btn_clear.click(clear_store, [], [status])
-        send_kwargs = dict(fn=respond, inputs=[msg, chatbot], outputs=[chatbot, sources, msg])
-        msg.submit(**send_kwargs)
-        send.click(**send_kwargs)
-        # 每次页面加载/刷新都按「实际的」向量库重算状态（否则刷新会回退到服务启动那一刻的快照）
-        app.load(_status_text, outputs=[status])
-    return app
+    # Flask 的流式响应：传入生成器，每 yield 一段就写一段到 socket——不需要把答案攒齐
+    return Response(stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache"})
 
 
 def main():
     # 进程级单例：embedder / splitter / store / generator（教学 demo 单用户，全局共享）。
     # 放在 main 里、key 确认之后初始化：import 本模块零副作用（不读盘、不打日志），
-    # 启动顺序一条线——配置确认 → 初始化 → 建 UI → launch。回调引用的就是这几个模块级名字
+    # 启动顺序一条线——配置确认 → 初始化 → 起服务。路由处理函数引用的就是这几个模块级名字
     #（Python 调用时才解析全局名，所以在 main 里 global 赋值即可）。
     global embedder, splitter, generator, store
     generator = Generator()
 
     # 启动前确保 chat 模型 key 就位：env/常量都没设 → 交互式问一次；空着就直接退出。
-    # 这里在主线程、launch() 之前，终端 stdin 可用（不像 web 请求线程里没 stdin）。
+    # 这里在主线程、起服务之前，终端 stdin 可用（不像请求处理线程里没 stdin）。
     if not generator.api_key:
         print("=" * 60)
         print("检测到尚未配置 chat 模型的 API Key")
@@ -380,14 +331,14 @@ def main():
         except Exception as e:
             print(f"[WARN] 读回向量库失败（{e}），从空库开始")
 
-    app = build_ui()
     print("=" * 60)
     print(f"Mini-RAG 聊天应用  ·  检索 {embedder.model}  ·  生成 {generator.model}")
     print(f"向量库：{len(store.chunks)} 个 chunk  ·  API Key：已配置")
     print("浏览器打开 http://127.0.0.1:7860  ·  Ctrl+C 退出")
     print("=" * 60)
-    app.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True,
-              theme=gr.themes.Soft())
+    # 等服务真的起来再开页（app.run 是阻塞的，直接 open 会抢在端口监听之前）
+    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:7860")).start()
+    app.run(host="127.0.0.1", port=7860)
 
 
 if __name__ == "__main__":
