@@ -5,7 +5,7 @@
 - 三个产品化改造：① Web 聊天界面（Flask 路由 + 静态页）
   ② 流式生成（SSE，答案一个字一个字蹦出来）
   ③ 文档管理（真 HTTP 文件上传，替代 step3 的命令行 ingest）
-- RAG 的核心链路（两级检索→拼 context→system 约束→生成）和 step3 完全一样，
+- RAG 的核心链路（混合检索→拼 context→system 约束→生成）和 step3 完全一样，
   本章只在外面包一层 Web —— 看清「产品化」到底改了什么、没改什么。
 
 启动:
@@ -19,15 +19,19 @@
 """
 
 import json
+import math
 import os
 import threading
 import webbrowser
 from pathlib import Path
 
+import jieba
 import numpy as np
 import requests
 from anthropic import Anthropic
 from flask import Flask, Response, jsonify, request, send_from_directory
+
+jieba.setLogLevel(40)     # 静默「Building prefix dict」启动日志，服务日志干净
 
 # 向量库持久化目录（同 step2/3 的三件套：chunks.json + embeddings.npy + metadata.json）
 DATA_DIR = Path(__file__).parent / "data"
@@ -38,7 +42,7 @@ TOP_K = 3
 
 
 # ================================================================
-# 复用：Embedder / RecursiveTextSplitter / VectorStore / Reranker（同 step1/2/3，内联以便自包含）
+# 复用：Embedder / RecursiveTextSplitter / VectorStore / BM25+RRF / Reranker（同 step1/2/3，内联以便自包含）
 # 几块逻辑和 step3 一致（省去前面 step 已讲过的 docstring）—— 本 step 不改 RAG 内核，只在外面包 Web。
 # ================================================================
 _DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -145,6 +149,47 @@ class VectorStore:
         return v_norm @ q_norm
 
 
+class BM25Index:
+    """稀疏检索一路（同 step3）：jieba 分词 + 手写 Okapi BM25，字面命中打分，零分不进结果。"""
+
+    K1, B = 1.5, 0.75
+
+    def __init__(self, chunks: list[str]):
+        self.docs = [[t for t in jieba.lcut(c) if t.strip()] for c in chunks]
+        self.N = len(self.docs)
+        self.avgdl = sum(len(d) for d in self.docs) / self.N if self.N else 0.0
+        self.df: dict[str, int] = {}
+        for d in self.docs:
+            for t in set(d):
+                self.df[t] = self.df.get(t, 0) + 1
+
+    def _idf(self, t: str) -> float:
+        df = self.df.get(t, 0)
+        return math.log((self.N - df + 0.5) / (df + 0.5) + 1)
+
+    def search(self, query: str, top_k: int = RECALL_K) -> list[tuple[int, float]]:
+        scores = [0.0] * self.N
+        for t in {tok for tok in jieba.lcut(query) if tok.strip()}:
+            idf = self._idf(t)
+            for i, d in enumerate(self.docs):
+                tf = d.count(t)
+                if tf and self.avgdl:
+                    scores[i] += idf * tf * (self.K1 + 1) / (
+                        tf + self.K1 * (1 - self.B + self.B * len(d) / self.avgdl))
+        hits = [(i, s) for i, s in enumerate(scores) if s > 0]
+        hits.sort(key=lambda x: -x[1])
+        return hits[:top_k]
+
+
+def rrf_merge(routes: list[list[int]], k: int = 60) -> list[tuple[int, float]]:
+    """RRF（同 step3）：跨路分数不可比 → 只按排名融合，score=Σ 1/(k+rank)，按 ID 归并去重。"""
+    scores: dict[int, float] = {}
+    for route in routes:
+        for rank, idx in enumerate(route, 1):
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+
 # ================================================================
 # 本章新东西①：Generator 改成「流式」
 # step3 的 Generator.answer() 是一次拿回整段答案；产品里用户想看着答案一个字一个字
@@ -218,22 +263,33 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_context(retrieved: list[tuple[int, float, float, str]]) -> str:
+def build_context(retrieved: list[tuple[int, float | None, str, float, str]]) -> str:
     """把精排后的 Top-K chunk 拼成带编号的 context（同 step3）。"""
-    parts = [f"[{i}] {chunk}" for i, (_, _, _, chunk) in enumerate(retrieved, 1)]
+    parts = [f"[{i}] {chunk}" for i, (_, _, _, _, chunk) in enumerate(retrieved, 1)]
     return "\n\n".join(parts)
 
 
 def retrieve(question: str, top_k: int = TOP_K):
-    """两级检索（同 step3）：向量召回 RECALL_K 条 → rerank 精排取 top_k，失败降级回向量顺序。"""
-    candidates = store.search(question, embedder, top_k=RECALL_K)
+    """三段式混合检索（同 step3）：向量+BM25 两路召回 → RRF 融合 → rerank 精排，失败降级回 RRF 顺序。
+
+    每条结果为 (chunk下标, 向量sim|None, 路由标记「两路/向量/BM25」, score, 原文)。"""
+    vec = store.search(question, embedder, top_k=RECALL_K)          # 稠密路
+    bm = bm25.search(question, top_k=RECALL_K)                      # 稀疏路
+    merged = rrf_merge([[i for i, _, _ in vec], [i for i, _ in bm]])  # ID 归并 + RRF
+    vec_sim = {i: s for i, s, _ in vec}
+    in_vec, in_bm = {i for i, _, _ in vec}, {i for i, _ in bm}
+    route_map = {i: ("两路" if i in in_vec and i in in_bm else "向量" if i in in_vec else "BM25")
+                 for i, _ in merged}
     try:
-        results = reranker.rerank(question, [c[2] for c in candidates], top_n=top_k)
-        retrieved = [(candidates[r["index"]][0], candidates[r["index"]][1],
-                      r["relevance_score"], candidates[r["index"]][2]) for r in results]
+        results = reranker.rerank(question, [store.chunks[i] for i, _ in merged], top_n=top_k)
+        retrieved = []
+        for r in results:
+            i = merged[r["index"]][0]
+            retrieved.append((i, vec_sim.get(i), route_map[i], r["relevance_score"], store.chunks[i]))
         return retrieved, True
     except Exception:
-        retrieved = [(idx, sim, sim, chunk) for idx, sim, chunk in candidates[:top_k]]
+        retrieved = [(i, vec_sim.get(i), route_map[i], rrf, store.chunks[i])
+                     for i, rrf in merged[:top_k]]
         return retrieved, False
 
 
@@ -263,11 +319,13 @@ def status():
 
 def _ingest_text(text: str, source: str) -> tuple[int, bool, str]:
     """切块 + 向量化 + 入库一份文档（同 step3 的 ingest）。幂等：source 已在库则跳过。返回 (块数, 是否新增, 提示)。"""
+    global bm25
     if any(m.get("source") == source for m in store.metadata):
         return 0, False, f"[SKIP]「{source}」已在库中"
     chunks = splitter.split_text(text)
     store.add(chunks, embedder, metadata=[{"source": source} for _ in chunks])
     store.save(str(DATA_DIR))
+    bm25 = BM25Index(store.chunks)     # 库变了 → 稀疏路索引跟着重建（百级 chunk 毫秒级）
     return len(chunks), True, f"[OK]「{source}」+{len(chunks)} 块"
 
 
@@ -289,7 +347,9 @@ def upload():
 @app.post("/api/clear")
 def clear():
     """「清空」端点：内存清零 + 删掉 data/ 落盘三件套。"""
+    global bm25
     store.chunks, store.metadata, store.vectors = [], [], None
+    bm25 = BM25Index(store.chunks)     # 稀疏路索引同步清空
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for f in DATA_DIR.glob("*"):
         try:
@@ -317,16 +377,17 @@ def chat():
     if not store.chunks:
         return jsonify(error="向量库为空，请先在左侧导入文档"), 400
 
-    retrieved, reranked = retrieve(message, top_k=TOP_K)              # 两级检索：召回 → 精排
+    retrieved, reranked = retrieve(message, top_k=TOP_K)              # 混合检索：两路召回→RRF→精排
     context = build_context(retrieved)                                # 增强①：拼 context
     user_msg = f"【参考资料】\n{context}\n\n【用户问题】\n{message}"
     # 把「前端带上来的对话历史 + 本轮 user（带参考资料）」一起喂给 LLM —— 多轮里能接住追问
     llm_messages = history + [{"role": "user", "content": user_msg}]
     sources_payload = [
-        {"i": i, "sim": round(sim, 3), "score": round(score, 3),
+        {"i": i, "sim": (round(sim, 3) if sim is not None else None),
+         "score": round(score, 3), "route": route,
          "source": store.metadata[idx].get("source", "?"),
          "preview": chunk.replace("\n", " ").strip()[:80]}
-        for i, (idx, sim, score, chunk) in enumerate(retrieved, 1)
+        for i, (idx, sim, route, score, chunk) in enumerate(retrieved, 1)
     ]
 
     def stream():
@@ -349,7 +410,7 @@ def main():
     # 放在 main 里、key 确认之后初始化：import 本模块零副作用（不读盘、不打日志），
     # 启动顺序一条线——配置确认 → 初始化 → 起服务。路由处理函数引用的就是这几个模块级名字
     #（Python 调用时才解析全局名，所以在 main 里 global 赋值即可）。
-    global embedder, splitter, generator, reranker, store
+    global embedder, splitter, generator, reranker, bm25, store
     generator = Generator()
 
     # 启动前确保 chat 模型 key 就位：env/常量都没设 → 交互式问一次；空着就直接退出。
@@ -373,6 +434,7 @@ def main():
             store.load(str(DATA_DIR))
         except Exception as e:
             print(f"[WARN] 读回向量库失败（{e}），从空库开始")
+    bm25 = BM25Index(store.chunks)             # 稀疏路索引（上传/清空后会跟着重建）
 
     print("=" * 60)
     print(f"Mini-RAG 聊天应用  ·  检索 {embedder.model}  ·  生成 {generator.model}")

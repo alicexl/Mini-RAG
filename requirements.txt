@@ -1,3 +1,4 @@
+jieba
 requests
 numpy
 anthropic

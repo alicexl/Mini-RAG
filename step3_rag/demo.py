@@ -2,7 +2,7 @@
 
 学习目标:
 - 把 step1(分块+向量化) + step2(向量库检索) + LLM 生成 拼成一个完整的 RAG
-- 两级检索：向量召回宽进（Top-20）→ rerank 精排收紧（Top-3），失败自动降级
+- 混合检索：向量 + BM25 两路召回宽进 → RRF 融合 → rerank 精排收紧，失败自动降级
 - RAG 里「增强（Augmented）」那一步到底做了什么：把检索回来的 chunk 作为 context 塞进 prompt
 - 「给 LLM 看检索结果再回答」的完整链路长什么样
 
@@ -19,18 +19,22 @@
   ① 环境变量 ANTHROPIC_API_KEY（推荐）；② 改 demo.py 顶部 API_KEY 常量；
   ③ 都没设 → 运行时交互式输入（仅本次运行有效）。换模型/网关用
   ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
-- rerank 走智谱开放平台原生 API（与生成共用同一个智谱 Key）。
+- rerank 走智谱开放平台原生 API（与生成共用同一个智谱 Key）；BM25 分词用 jieba。
 """
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
 
+import jieba
 import numpy as np
 import requests
 from anthropic import Anthropic
+
+jieba.setLogLevel(40)     # 静默「Building prefix dict」启动日志，demo 输出干净
 
 # 向量库持久化目录（chunks.json + embeddings.npy + metadata.json 三件套，同 step2）
 DATA_DIR = Path(__file__).parent / "data"
@@ -172,6 +176,59 @@ class VectorStore:
         return v_norm @ q_norm        # (N, dim) @ (dim,) -> (N,)
 
 
+# ===== BM25：稀疏检索一路（字面命中打分）=====
+# 与向量（稠密）一路互补：稠密看「语义像」，BM25 看「查询词在文档里出现没有、
+# 出现多少、区分度高不高」。教学版不引检索库——分词用 jieba，Okapi 公式摊开手写：
+#   score(q, D) = Σ_idf(t) · tf·(k1+1) / (tf + k1·(1-b+b·|D|/avgdl))
+# 注意零分的语义：查询词一个都没出现——稀疏路「证得了字面不存在」，
+# 稠密路则永远给得出分（问分红照样给 0.58 的「话题像」分）。
+class BM25Index:
+    K1, B = 1.5, 0.75                 # Okapi 常用参数：词频饱和度 / 长度归一
+
+    def __init__(self, chunks: list[str]):
+        """从 chunk 列表现建索引（百级 chunk 毫秒级，不落盘——启动时重建即可）。"""
+        self.docs = [[t for t in jieba.lcut(c) if t.strip()] for c in chunks]
+        self.N = len(self.docs)
+        self.avgdl = sum(len(d) for d in self.docs) / self.N if self.N else 0.0
+        self.df: dict[str, int] = {}  # 词 → 出现它的文档数（越少越有区分度，idf 越高）
+        for d in self.docs:
+            for t in set(d):
+                self.df[t] = self.df.get(t, 0) + 1
+
+    def _idf(self, t: str) -> float:
+        df = self.df.get(t, 0)
+        return math.log((self.N - df + 0.5) / (df + 0.5) + 1)   # +1 变体，恒正
+
+    def search(self, query: str, top_k: int = RECALL_K) -> list[tuple[int, float]]:
+        """返回 [(chunk下标, bm25分)] 按分降序；零分（查询词未出现）不进结果。"""
+        scores = [0.0] * self.N
+        for t in {tok for tok in jieba.lcut(query) if tok.strip()}:   # 查询词去重
+            idf = self._idf(t)
+            for i, d in enumerate(self.docs):
+                tf = d.count(t)
+                if tf and self.avgdl:
+                    scores[i] += idf * tf * (self.K1 + 1) / (
+                        tf + self.K1 * (1 - self.B + self.B * len(d) / self.avgdl))
+        hits = [(i, s) for i, s in enumerate(scores) if s > 0]
+        hits.sort(key=lambda x: -x[1])
+        return hits[:top_k]
+
+
+def rrf_merge(routes: list[list[int]], k: int = 60) -> list[tuple[int, float]]:
+    """RRF（Reciprocal Rank Fusion）：把多路召回合成一个排序。
+
+    两路的分数不可比（余弦 0~1 vs BM25 无上界），直接相加没有意义——所以只用**排名**：
+        score(d) = Σ 各路 1/(k + rank)；k=60 是常用常数，抹平头部名次间的悬殊权重。
+    按 chunk 下标累加，天然完成 ID 归并去重；同 chunk 被两路同时命中反而加分——
+    「语义也像、字面也中」的块理应排得更前。
+    """
+    scores: dict[int, float] = {}
+    for route in routes:
+        for rank, idx in enumerate(route, 1):
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+
 # ===== Generator：调 LLM 生成（本章的新东西）=====
 # 检索回来的 chunk 是文本，要交给 LLM 才能生成自然语言答案。这里走智谱 GLM 的 Anthropic 兼容网关。
 # API Key 三种配置方式：
@@ -250,35 +307,49 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_context(retrieved: list[tuple[int, float, float, str]]) -> str:
+def build_context(retrieved: list[tuple[int, float | None, str, float, str]]) -> str:
     """把精排后的 Top-K chunk 拼成一段带编号的 context，喂给 LLM 当作「参考资料」。"""
-    parts = [f"[{i}] {chunk}" for i, (_, _, _, chunk) in enumerate(retrieved, 1)]
+    parts = [f"[{i}] {chunk}" for i, (_, _, _, _, chunk) in enumerate(retrieved, 1)]
     return "\n\n".join(parts)
 
 
-def retrieve(question: str, store: VectorStore, embedder: Embedder,
-             reranker: Reranker, top_k: int = TOP_K) -> tuple[list[tuple[int, float, float, str]], bool]:
-    """两级检索：向量召回 RECALL_K 条（粗排）→ rerank 精排取 top_k（收紧）。
+def retrieve(question: str, store: VectorStore, bm25: BM25Index, embedder: Embedder,
+             reranker: Reranker, top_k: int = TOP_K,
+             recall_k: int = RECALL_K) -> tuple[list[tuple[int, float | None, str, float, str]], bool]:
+    """三段式检索：两路召回宽进 → RRF 融合 → rerank 精排收紧。
 
-    rerank 失败自动降级——直接用向量顺序的前 top_k，检索不中断。
-    返回 (结果, 是否精排成功)；每条结果为 (chunk下标, 向量sim, 精排score, 原文)，
-    降级时 score 就是向量 sim（两个分数学术口径不同，但都能看排序）。
+    向量一路（稠密/语义）+ BM25 一路（稀疏/字面）各召回 recall_k 条；跨路分数不可比，
+    rrf_merge 按 chunk ID 归并去重、按排名融合；融合候选交 rerank 精排取 top_k。
+    rerank 失败降级：直接用 RRF 顺序的前 top_k，检索不中断。
+
+    每条结果为 (chunk下标, 向量sim|None, 路由标记, score, 原文)：
+    sim 只有向量路命中的 chunk 才有；路由标记「两路/向量/BM25」说明这块从哪来；
+    score 是精排分，降级时为 RRF 分（数值口径不同，都用于排序）。
     """
-    candidates = store.search(question, embedder, top_k=RECALL_K)     # 粗排：宽进
+    vec = store.search(question, embedder, top_k=recall_k)          # 稠密路：语义宽进
+    bm = bm25.search(question, top_k=recall_k)                      # 稀疏路：字面宽进
+    merged = rrf_merge([[i for i, _, _ in vec], [i for i, _ in bm]])  # ID 归并去重 + RRF 融合
+    vec_sim = {i: s for i, s, _ in vec}
+    in_vec, in_bm = {i for i, _, _ in vec}, {i for i, _ in bm}
+    route_map = {i: ("两路" if i in in_vec and i in in_bm else "向量" if i in in_vec else "BM25")
+                 for i, _ in merged}
     try:
-        results = reranker.rerank(question, [c[2] for c in candidates], top_n=top_k)
-        retrieved = [(candidates[r["index"]][0], candidates[r["index"]][1],
-                      r["relevance_score"], candidates[r["index"]][2]) for r in results]
+        results = reranker.rerank(question, [store.chunks[i] for i, _ in merged], top_n=top_k)
+        retrieved = []
+        for r in results:
+            i = merged[r["index"]][0]
+            retrieved.append((i, vec_sim.get(i), route_map[i], r["relevance_score"], store.chunks[i]))
         return retrieved, True
     except Exception:
-        retrieved = [(idx, sim, sim, chunk) for idx, sim, chunk in candidates[:top_k]]
+        retrieved = [(i, vec_sim.get(i), route_map[i], rrf, store.chunks[i])
+                     for i, rrf in merged[:top_k]]
         return retrieved, False
 
 
-def rag_answer(question: str, store: VectorStore, embedder: Embedder,
+def rag_answer(question: str, store: VectorStore, bm25: BM25Index, embedder: Embedder,
                generator: Generator, reranker: Reranker, top_k: int = TOP_K):
-    """一条完整的 RAG：两级检索 → 拼 prompt → 生成。"""
-    retrieved, reranked = retrieve(question, store, embedder, reranker, top_k=top_k)   # Retrieval
+    """一条完整的 RAG：混合检索 → 拼 prompt → 生成。"""
+    retrieved, reranked = retrieve(question, store, bm25, embedder, reranker, top_k=top_k)  # Retrieval
     context = build_context(retrieved)                             # Augmented（把检索结果拼进 prompt）
     user = f"【参考资料】\n{context}\n\n【用户问题】\n{question}"
     answer = generator.answer(SYSTEM_PROMPT, user)                 # Generation
@@ -338,6 +409,7 @@ def cmd_chat():
     store.load(str(DATA_DIR))
     generator = Generator()
     reranker = Reranker(generator.api_key)    # 精排与生成共用同一个智谱 Key
+    bm25 = BM25Index(store.chunks)            # 稀疏路索引启动时从 chunks 现建（毫秒级）
 
     print("=" * 64)
     print(f"向量库：{len(store.chunks)} 个 chunk（检索 {embedder.model} / 生成 {generator.model}）")
@@ -353,22 +425,24 @@ def cmd_chat():
         if not q:
             continue
         try:
-            retrieved, reranked, answer, context = rag_answer(q, store, embedder,
+            retrieved, reranked, answer, context = rag_answer(q, store, bm25, embedder,
                                                               generator, reranker, top_k=TOP_K)
         except Exception as e:
             print(f"\n[ERROR] 生成失败：{e}")
             print("请确认已配置 chat 模型鉴权（ANTHROPIC_API_KEY / API_KEY 常量 / 交互输入）")
             continue
 
-        head = f"检索：召回 {RECALL_K} → rerank 精排 → Top-{TOP_K}（[1][2][3] 即「根据[1]」的引用）"
+        head = (f"检索：向量 + BM25 两路各召回 {RECALL_K} → RRF 融合 → rerank 精排 → Top-{TOP_K}"
+                "（[1][2][3] 即「根据[1]」的引用）")
         if not reranked:
-            head += "\n[WARN] rerank 失败，降级用向量顺序（sim 即 score）"
+            head += "\n[WARN] rerank 失败，降级用 RRF 顺序（score 为 RRF 分）"
         print(f"\n{head}：")
-        for i, (idx, sim, score, chunk) in enumerate(retrieved, 1):
+        for i, (idx, sim, route, score, chunk) in enumerate(retrieved, 1):
             src = store.metadata[idx].get("source", "")
+            sim_s = f"{sim:.3f}" if sim is not None else "  -  "
             raw = chunk.replace("\n", "↵")
-            preview = raw[:40] + ("…" if len(raw) > 40 else "")
-            print(f"  [{i}] sim={sim:.3f} score={score:.3f} [{src}] {preview}")
+            preview = raw[:34] + ("…" if len(raw) > 34 else "")
+            print(f"  [{i}] sim={sim_s} score={score:.3f} [{route}] [{src}] {preview}")
         # 增强：把检索结果拼成 prompt 喂给 LLM —— RAG 的关键一步（检索结果 → prompt）
         print("\n→ 拼 prompt 喂给 LLM（增强 = 检索结果 + system 约束）：")
         print("  [system] 只能用【参考资料】，引用编号（如「根据[1]」），没有就说没有")

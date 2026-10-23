@@ -142,9 +142,10 @@ function addBubble(role, text) {
 
 function renderSources(sources, reranked) {
   const box = $("sources");
-  box.textContent = `本次检索来源（召回 20 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用向量顺序"}）：\n`;
+  box.textContent = `本次检索来源（向量+BM25 两路召回 → RRF 融合 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用 RRF 顺序"}）：\n`;
   for (const s of sources) {
-    box.textContent += `\n[${s.i}] sim=${s.sim} score=${s.score} · ${s.source}\n    ${s.preview}…`;
+    const sim = (s.sim === null || s.sim === undefined) ? "  - " : s.sim;
+    box.textContent += `\n[${s.i}] sim=${sim} score=${s.score} [${s.route}] · ${s.source}\n    ${s.preview}…`;
   }
 }
 
