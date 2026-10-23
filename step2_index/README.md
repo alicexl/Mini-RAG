@@ -106,7 +106,7 @@ order = np.argsort(-sims)[:top_k]    # argsort 默认升序，加个负号变降
 把前两步串起来，就是一条完整的 RAG 检索链路：
 
 ```
-文档 → 切块(step1下半) → embed(step1上半) → 入库(step2) → 查询embed → 余弦Top-K → 返回chunk
+文档 → 切块+向量化(step1) → 入库(step2) → 查询embed → 余弦Top-K → 返回chunk
 ```
 
 跑 demo（`python -X utf8 step2_index/demo.py`），输入是一段约 670 字的盐湖股份年报文本，切成 chunk_size=200 的块：

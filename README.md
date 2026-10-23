@@ -26,7 +26,7 @@ set ANTHROPIC_API_KEY=你的智谱key      # macOS/Linux 用 export
 python -X utf8 step2_index/demo.py
 ```
 
-step1 后半（分块）纯标准库、零依赖；step1 前半与 step2 需要本地 Ollama；step3/4 另需智谱 key。
+step1 的向量化部分与 step2 需要本地 Ollama（step1 的分块演示纯标准库、零依赖）；step3/4 另需智谱 key。
 
 step3 是两条子命令：
 

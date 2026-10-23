@@ -1,14 +1,14 @@
 """Step 1: 基础件 —— Embedding（向量化）与 Chunking（分块）
 
 RAG 的两道地基工序，一个 demo 讲完：
-- 前半 Embedding：文本变向量，余弦相似度找语义接近（需要本地 Ollama）
-- 后半 Chunking：长文档切 chunk，递归切分保语义边界 + overlap（纯标准库，零依赖）
+- Embedding：文本变向量，余弦相似度找语义接近（需要本地 Ollama）
+- Chunking：长文档切 chunk，递归切分保语义边界 + overlap（纯标准库，零依赖）
 
 运行:
     python -X utf8 step1_basics/demo.py
 
-前半需要 Ollama 已启动 + qwen3-embedding:0.6b 已下载；没起 Ollama 也能跑——
-前半会提示失败原因，然后继续跑后半（分块不依赖任何服务）。
+向量化部分需要 Ollama 已启动 + qwen3-embedding:0.6b 已下载；没起 Ollama 也能跑——
+向量化会提示失败原因，然后继续跑分块（分块不依赖任何服务）。
 """
 
 import os
@@ -125,7 +125,7 @@ def split_fixed(text: str, chunk_size: int) -> list[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-# ===== 前半的测试文本：4 段，1↔2 否定陷阱，3↔2 因果弱信号，文本4 天气正交 =====
+# ===== Embedding 演示的测试文本：4 段，1↔2 否定陷阱，3↔2 因果弱信号，文本4 天气正交 =====
 EMBED_TEXTS = [
     "盐湖股份2024年净利润大幅增长。",
     "盐湖股份2024年净利润大幅下滑。",
@@ -133,7 +133,7 @@ EMBED_TEXTS = [
     "今天天气不错，适合出去散步。",
 ]
 
-# ===== 后半的示例文本：6 段盐湖股份年报体 =====
+# ===== Chunking 演示的示例文本：6 段盐湖股份年报体 =====
 SAMPLE_TEXT = """\
 盐湖股份2024年实现营业收入150亿元，同比增长12%；归母净利润45亿元，同比增长20%。公司业绩增长主要得益于钾肥价格回暖与碳酸锂产销两旺。年报显示，公司整体毛利率较上年提升3个百分点，盈利能力持续改善。
 
@@ -157,10 +157,10 @@ def _print_chunks(chunks: list[str], title: str):
         print(f"  [{i}] ({len(c):>3}字) {preview}")
 
 
-def part_embedding():
-    """前半：文本向量化 —— 看语义怎么变成可以算的距离。"""
+def demo_embedding():
+    """文本向量化 —— 看语义怎么变成可以算的距离。"""
     print("\n" + "=" * 64)
-    print("前半：文本向量化 —— 理解 Embedding")
+    print("文本向量化 —— 理解 Embedding")
     print("=" * 64)
 
     embedder = Embedder()
@@ -173,7 +173,7 @@ def part_embedding():
     except Exception as e:
         print(f"\n[WARN] 向量化失败：{e}")
         print("请确认 Ollama 已启动（ollama serve）且模型已下载（ollama pull qwen3-embedding:0.6b）")
-        print("跳过前半，继续跑后半（分块不依赖任何服务）")
+        print("跳过向量化，继续跑分块（分块不依赖任何服务）")
         return False
 
     # 打印每段文本的向量维度
@@ -211,10 +211,10 @@ def part_embedding():
     return True
 
 
-def part_chunking():
-    """后半：文档分块 —— 长文档怎么切成检索单位。"""
+def demo_chunking():
+    """文档分块 —— 长文档怎么切成检索单位。"""
     print("\n" + "=" * 64)
-    print("后半：文档分块 —— 理解 Chunking")
+    print("文档分块 —— 理解 Chunking")
     print("=" * 64)
 
     print(f"\n示例文本（{len(SAMPLE_TEXT)} 字，6 个段落）：")
@@ -261,8 +261,8 @@ def main():
     print("=" * 60)
     print("Step 1: 基础件 —— Embedding 与 Chunking")
     print("=" * 60)
-    part_embedding()
-    part_chunking()
+    demo_embedding()
+    demo_chunking()
 
 
 if __name__ == "__main__":

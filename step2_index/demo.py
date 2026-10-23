@@ -185,7 +185,7 @@ def main():
     embedder = Embedder()
     print(f"\n模型: {embedder.model} @ {embedder.base_url}")
 
-    # ---- [1] 切块(step1下半) → embed(step1上半) → 入库(本step) ----
+    # ---- [1] 切块(step1) → 向量化(step1) → 入库(本step) ----
     print("\n[1] 切块 + 向量化 + 入库")
     splitter = RecursiveTextSplitter(chunk_size=200)
     chunks = splitter.split_text(SAMPLE_DOC)

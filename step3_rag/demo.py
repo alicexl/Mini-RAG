@@ -39,7 +39,7 @@ DATA_DIR = Path(__file__).parent / "data"
 RECALL_K = 20
 TOP_K = 3
 
-# ===== Embedder（同 step1 上半，内联以便 demo 自包含）=====
+# ===== Embedder（同 step1，内联以便 demo 自包含）=====
 # 把文本喂给 Ollama 的 embedding 模型拿回向量；model/base_url 从环境变量读，默认连本地 Ollama。
 _DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _DEFAULT_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
@@ -61,7 +61,7 @@ class Embedder:
         return resp.json()["embeddings"]
 
 
-# ===== RecursiveTextSplitter（同 step1 下半，内联以便 demo 自包含）=====
+# ===== RecursiveTextSplitter（同 step1，内联以便 demo 自包含）=====
 # 按分隔符优先级切（段落→换行→句号→…→空格→空串兜底），尽量让每块落在语义边界。
 class RecursiveTextSplitter:
     # 按优先级从高到低排列的分隔符：段落 → 换行 → 句号 → … → 空格 → 空串（字符级兜底，必须放末尾）
@@ -287,7 +287,7 @@ def rag_answer(question: str, store: VectorStore, embedder: Embedder,
 
 # ===== 命令一：ingest —— 导入单个文档 =====
 def cmd_ingest(doc_path: str):
-    """读文档 → 切块(step1下半) → 向量化(step1上半) → 入库(step2)。
+    """读文档 → 切块+向量化(step1) → 入库(step2)。
 
     来源名取文件名（metadata 用它标注，检索结果里能看到出自哪份文档）。
     幂等：同来源已在库中则跳过（按 metadata 的 source 判定），重复导入不重复入库。
