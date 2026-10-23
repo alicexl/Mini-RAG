@@ -1,14 +1,55 @@
-"""Step 2: 文档分块 —— 理解 Chunking
+"""Step 1: 基础件 —— Embedding（向量化）与 Chunking（分块）
 
-学习目标:
-- 为什么要把长文档切成块？（整篇压一个向量有什么问题）
-- chunk_size 切多大才合适？
-- 递归切分：为什么比"固定字符数硬切"好？
-- overlap（重叠）：怎么避免在切分边界丢信息
+RAG 的两道地基工序，一个 demo 讲完：
+- 前半 Embedding：文本变向量，余弦相似度找语义接近（需要本地 Ollama）
+- 后半 Chunking：长文档切 chunk，递归切分保语义边界 + overlap（纯标准库，零依赖）
 
 运行:
-    python -X utf8 step2_chunking/demo.py
+    python -X utf8 step1_basics/demo.py
+
+前半需要 Ollama 已启动 + qwen3-embedding:0.6b 已下载；没起 Ollama 也能跑——
+前半会提示失败原因，然后继续跑后半（分块不依赖任何服务）。
 """
+
+import os
+
+import requests
+
+# ===== Embedder：把文本变成向量 =====
+# 设计要点：
+# - model / base_url 从环境变量读，默认连本地 Ollama + qwen3-embedding:0.6b
+# - embed_batch 一次请求嵌入多段文本（Ollama /api/embed 支持 input 为列表）
+# - cosine_similarity 是纯数学，不依赖任何第三方库
+_DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+_DEFAULT_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
+
+
+class Embedder:
+    """把文本喂给 Ollama 的 embedding 模型，拿回向量。"""
+
+    def __init__(self, base_url: str = _DEFAULT_BASE_URL, model: str = _DEFAULT_MODEL):
+        self.base_url = base_url
+        self.model = model
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量嵌入：一次请求把多段文本都变成向量。"""
+        resp = requests.post(
+            f"{self.base_url}/api/embed",
+            json={"model": self.model, "input": list(texts)},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["embeddings"]
+
+    @staticmethod
+    def cosine_similarity(a: list[float], b: list[float]) -> float:
+        """两个向量的余弦相似度，范围 [-1, 1]，越接近 1 越相似。"""
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
+        if norm_a == 0 or norm_b == 0:
+            return 0.0  # 零向量防御，避免除零
+        return dot / (norm_a * norm_b)
 
 
 # ===== RecursiveTextSplitter：递归文本切分器 =====
@@ -40,7 +81,7 @@ class RecursiveTextSplitter:
         关键：parts 保留 `split` 的全部结果（含空串、"\n\n" 空白残片）——末片位由空白残片占着，
         真句子落在非末片位置、正常焊回自己的分隔符。
         """
-        # 按优先级找第一个出现在 text 里的分隔符；一路找到空串还没命中，就字符级硬切
+        # 按优先级找第一个出现在 text 里的分隔符；一路找到空串还没命中，就字符级硬切兜底
         for i, sep in enumerate(separators):
             if sep == "":          # 遍历到空串 = 没有语义边界可用了，字符级硬切兜底
                 return [text[j:j + self.chunk_size] for j in range(0, len(text), self.chunk_size)]
@@ -84,7 +125,15 @@ def split_fixed(text: str, chunk_size: int) -> list[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
-# ===== Demo =====
+# ===== 前半的测试文本：4 段，1↔2 否定陷阱，3↔2 因果弱信号，文本4 天气正交 =====
+EMBED_TEXTS = [
+    "盐湖股份2024年净利润大幅增长。",
+    "盐湖股份2024年净利润大幅下滑。",
+    "碳酸锂价格在2024年持续下跌，从年初的10万元/吨跌至年末的7万元/吨。",
+    "今天天气不错，适合出去散步。",
+]
+
+# ===== 后半的示例文本：6 段盐湖股份年报体 =====
 SAMPLE_TEXT = """\
 盐湖股份2024年实现营业收入150亿元，同比增长12%；归母净利润45亿元，同比增长20%。公司业绩增长主要得益于钾肥价格回暖与碳酸锂产销两旺。年报显示，公司整体毛利率较上年提升3个百分点，盈利能力持续改善。
 
@@ -108,9 +157,64 @@ def _print_chunks(chunks: list[str], title: str):
         print(f"  [{i}] ({len(c):>3}字) {preview}")
 
 
-def main():
+def part_embedding():
+    """前半：文本向量化 —— 看语义怎么变成可以算的距离。"""
+    print("\n" + "=" * 64)
+    print("前半：文本向量化 —— 理解 Embedding")
     print("=" * 64)
-    print("Step 2: 文档分块 —— 理解 Chunking")
+
+    embedder = Embedder()
+    print(f"\n模型: {embedder.model}")
+    print(f"Ollama 地址: {embedder.base_url}")
+
+    print(f"\n正在向量化 {len(EMBED_TEXTS)} 段文本...")
+    try:
+        vectors = embedder.embed_batch(EMBED_TEXTS)
+    except Exception as e:
+        print(f"\n[WARN] 向量化失败：{e}")
+        print("请确认 Ollama 已启动（ollama serve）且模型已下载（ollama pull qwen3-embedding:0.6b）")
+        print("跳过前半，继续跑后半（分块不依赖任何服务）")
+        return False
+
+    # 打印每段文本的向量维度
+    for i, (text, vec) in enumerate(zip(EMBED_TEXTS, vectors)):
+        print(f"\n  文本{i+1}: {text[:40]}...")
+        print(f"  向量维度: {len(vec)}, 前5个值: {[round(v, 4) for v in vec[:5]]}")
+
+    # 计算两两之间的余弦相似度
+    print("\n" + "=" * 64)
+    print("余弦相似度矩阵（越接近 1 越相似）:")
+    print("=" * 64)
+
+    # 打印表头
+    header = "      " + "".join(f" 文本{j+1} " for j in range(len(EMBED_TEXTS)))
+    print(header)
+    for i in range(len(EMBED_TEXTS)):
+        row = f"文本{i+1} "
+        for j in range(len(EMBED_TEXTS)):
+            sim = Embedder.cosine_similarity(vectors[i], vectors[j])
+            row += f" {sim:.3f} "
+        print(row)
+
+    # 解读
+    print("\n" + "=" * 64)
+    print("解读:")
+    print("=" * 64)
+    print("  文本1↔文本2: 净利润增长 vs 下滑，只差一词、意思相反 → 相似度仍很高（否定陷阱）")
+    print("  文本3↔文本2: 碳酸锂跌 → 净利润下滑，因果相关 → 相似度却不高（弱信号）")
+    print("  文本1/2/3 ↔ 文本4: 财务/商品 vs 天气，语义无关 → 相似度低")
+    print()
+    print("  这就是 Embedding 的核心价值：")
+    print("  把文本映射到向量空间，语义相似的文本向量更近，")
+    print("  从而可以用数学方法（余弦相似度）衡量语义相似性。")
+    print("  RAG 检索的本质就是：找与用户查询向量最近的文档向量。")
+    return True
+
+
+def part_chunking():
+    """后半：文档分块 —— 长文档怎么切成检索单位。"""
+    print("\n" + "=" * 64)
+    print("后半：文档分块 —— 理解 Chunking")
     print("=" * 64)
 
     print(f"\n示例文本（{len(SAMPLE_TEXT)} 字，6 个段落）：")
@@ -151,6 +255,14 @@ def main():
         _print_chunks(s.split_text(SAMPLE_TEXT), f"overlap={ov}")
     print("\n  overlap=0：相邻块各管各，若关键句恰好在切分边界，可能两边都不完整。")
     print("  overlap=50：相邻块共享约 50 字，边界附近的信息两边都能检索到——代价是存储/计算略增。")
+
+
+def main():
+    print("=" * 60)
+    print("Step 1: 基础件 —— Embedding 与 Chunking")
+    print("=" * 60)
+    part_embedding()
+    part_chunking()
 
 
 if __name__ == "__main__":

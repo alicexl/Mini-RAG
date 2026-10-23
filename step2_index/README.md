@@ -1,14 +1,14 @@
-# Step 3 — 本地向量库：存起来，检索出来
+# Step 2 — 本地向量库：存起来，检索出来
 
 > JSON 存原文 + numpy 存向量 + 余弦线性扫描——不依赖任何现成向量数据库（FAISS / Milvus / Chroma），把"检索到底在做什么"彻底摊开。
-> 五步路径与各步概览见仓库根目录 [README](../README.md)。
+> 四步路径与各步概览见仓库根目录 [README](../README.md)。
 
 ## 快速开始
 
-前提：Ollama 已启动且 `qwen3-embedding:0.6b` 已拉取（启动方式见 [Step 1 快速开始](../step1_embedding/README.md)）。
+前提：Ollama 已启动且 `qwen3-embedding:0.6b` 已拉取（启动方式见 [Step 1 快速开始](../step1_basics/README.md)）。
 
 ```bash
-python -X utf8 step3_index/demo.py
+python -X utf8 step2_index/demo.py
 ```
 
 纯本地检索、无需 API Key。
@@ -17,7 +17,7 @@ python -X utf8 step3_index/demo.py
 
 ## 1. 向量库：存什么
 
-[Step 2](../step2_chunking/README.md) 把长文档切成了 chunk，[Step 1](../step1_embedding/README.md) 把每个 chunk 变成了向量。现在手头有一堆 `(chunk 文本, 向量)` 的配对。RAG 查询时要做的，就是**把用户的问题也变成向量，然后在这一堆里找出最相似的几个 chunk**。
+[Step 1](../step1_basics/README.md) 把长文档切成了 chunk，又把每个 chunk 变成了向量。现在手头有一堆 `(chunk 文本, 向量)` 的配对。RAG 查询时要做的，就是**把用户的问题也变成向量，然后在这一堆里找出最相似的几个 chunk**。
 
 这堆 `(chunk, 向量)` 怎么管？总不能每次查询都重新切一遍文档、重新 embed 一遍——那又慢又贵。所以需要一个**向量库（vector store）**把它管起来，干两件事：
 
@@ -67,7 +67,7 @@ def save(self, data_dir):
 
 ### 算分：查询向量 vs 每个 chunk 向量
 
-把查询 embed 成一个向量 `q`，和库里的每个 chunk 向量算余弦相似度，得到 N 个分数。[Step 1](../step1_embedding/README.md) 的余弦是两个向量逐元素算的（标量循环）：
+把查询 embed 成一个向量 `q`，和库里的每个 chunk 向量算余弦相似度，得到 N 个分数。[Step 1](../step1_basics/README.md) 的余弦是两个向量逐元素算的（标量循环）：
 
 ```python
 dot = sum(x * y for x, y in zip(a, b))
@@ -103,13 +103,13 @@ order = np.argsort(-sims)[:top_k]    # argsort 默认升序，加个负号变降
 
 ## 3. 动手：完整检索链路
 
-把前三步串起来，就是一条完整的 RAG 检索链路：
+把前两步串起来，就是一条完整的 RAG 检索链路：
 
 ```
-文档 → 切块(step2) → embed(step1) → 入库(step3) → 查询embed → 余弦Top-K → 返回chunk
+文档 → 切块(step1下半) → embed(step1上半) → 入库(step2) → 查询embed → 余弦Top-K → 返回chunk
 ```
 
-跑 demo（`python -X utf8 step3_index/demo.py`），输入是一段约 670 字的盐湖股份年报文本，切成 chunk_size=200 的块：
+跑 demo（`python -X utf8 step2_index/demo.py`），输入是一段约 670 字的盐湖股份年报文本，切成 chunk_size=200 的块：
 
 ```
 [1] 切块 + 向量化 + 入库
@@ -142,7 +142,7 @@ order = np.argsort(-sims)[:top_k]    # argsort 默认升序，加个负号变降
 
 ### 怎么读这组结果
 
-- **三个查询的 Top-1 都命中了对应主题**（赚钱→业绩段、锂产能→碳酸锂段、钾肥→钾肥段）。查询词和原文措辞并不重合——"赚钱"vs"营业收入"、"锂业务"vs"碳酸锂"——靠的是 [Step 1](../step1_embedding/README.md) 的语义向量，不是字面匹配。这就是稠密检索的价值。
+- **三个查询的 Top-1 都命中了对应主题**（赚钱→业绩段、锂产能→碳酸锂段、钾肥→钾肥段）。查询词和原文措辞并不重合——"赚钱"vs"营业收入"、"锂业务"vs"碳酸锂"——靠的是 [Step 1](../step1_basics/README.md) 的语义向量，不是字面匹配。这就是稠密检索的价值。
 - **每行第二个方括号里是元信息里的来源**——命中后自动带上出处。这就是 metadata 的用武之地：库里几十份文档时，检索回来不仅知道"最相关"，还知道"出自哪"，RAG 里可追溯、可引用（本例五块同源，所以都一样）。
 - **相似度的绝对值不高，但排序是对的**。"赚了多少钱"的 Top-1 才 0.362，照理不算"很相似"。这正好印证了 Step 1 那句话——**RAG 检索用 Top-K 而不是硬阈值**：如果卡个 0.5 的阈值，这个查询就什么都召回不回来，可它的 Top-1 明明是对的。短查询对长 chunk 的余弦天生偏低，看排序、别看绝对值。
 - **查询越具体、字面越接近，相似度越高**。"钾肥是主要业务吗"0.698 远高于"赚了多少钱"0.362——前者连字面都和钾肥段高度重合，后者只是泛泛地问"赚钱"。同样是 Top-1，分数可以差很多，所以阈值根本定不了一个万能值。
@@ -174,7 +174,7 @@ order = np.argsort(-sims)[:top_k]    # argsort 默认升序，加个负号变降
 | **索引结构** | 倒排索引（O(1) 查词） | 向量索引（线性扫描或 ANN） |
 | **擅长** | 精确匹配、专有名词、可控可解释 | 理解语义、容错、跨表述 |
 
-它们不是谁替代谁——生产级 RAG 通常**两者都用**（混合检索），稠密负责"语义相关"、稀疏负责"字面精确"，把两路结果合并再喂给 LLM。本项目只做稠密这一支（朴素 RAG），混合检索、rerank 这些工程化能力留给生产级 RAG 系统。
+它们不是谁替代谁——生产级 RAG 通常**两者都用**（混合检索），稠密负责"语义相关"、稀疏负责"字面精确"，把两路结果合并再喂给 LLM。本项目只做稠密这一支，精排一环已加上（rerank，见 [Step 3](../step3_rag/README.md)）；混合检索仍留给生产级 RAG 系统。
 
 ## 5. 小结
 
@@ -184,6 +184,6 @@ order = np.argsort(-sims)[:top_k]    # argsort 默认升序，加个负号变降
 
 ## 下一步
 
-[Step 4：完整 RAG →](../step4_rag/README.md)
+[Step 3：完整 RAG →](../step3_rag/README.md)
 
 检索回来的 Top-K 个 chunk，怎么交给 LLM、让它基于这些内容回答用户问题？这一步讲的是 RAG 里的 **R**（Retrieval，检索）；下一步补上 **A**（Augmented，增强——把检索回来的 chunk 组织成参考资料）和 **G**（Generation，生成——LLM 基于资料作答），拼成完整的"检索增强生成"闭环。

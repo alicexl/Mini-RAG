@@ -1,13 +1,13 @@
-"""Step 3: 本地向量库 —— 存起来，检索出来
+"""Step 2: 本地向量库 —— 存起来，检索出来
 
 学习目标:
 - 切好的 chunk 怎么存（向量 + 原文 + 元信息分开存）
 - 检索到底在做什么（查询向量 vs 所有 chunk 向量，算余弦，取 Top-K）
-- 从零搭一个最小的向量库（JSON + numpy），把 step1 的 embedding + step2 的切块
+- 从零搭一个最小的向量库（JSON + numpy），把 step1 的分块 + 向量化
   串成一条完整的检索链路
 
 运行:
-    python -X utf8 step3_index/demo.py
+    python -X utf8 step2_index/demo.py
 
 依赖 Ollama 已启动 + qwen3-embedding:0.6b 已下载（同 step1）。
 """
@@ -179,13 +179,13 @@ QUERIES = [
 
 def main():
     print("=" * 64)
-    print("Step 3: 本地向量库 —— 存起来，检索出来")
+    print("Step 2: 本地向量库 —— 存起来，检索出来")
     print("=" * 64)
 
     embedder = Embedder()
     print(f"\n模型: {embedder.model} @ {embedder.base_url}")
 
-    # ---- [1] 切块(step2) → embed(step1) → 入库(step3) ----
+    # ---- [1] 切块(step1下半) → embed(step1上半) → 入库(本step) ----
     print("\n[1] 切块 + 向量化 + 入库")
     splitter = RecursiveTextSplitter(chunk_size=200)
     chunks = splitter.split_text(SAMPLE_DOC)

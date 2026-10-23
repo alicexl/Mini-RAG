@@ -14,14 +14,11 @@ venv/
 *.wav
 *_transcript_*.txt
 
-# step3 demo 生成的向量库（运行产物）
-step3_index/data/
-
 # IDE
 .vscode/
 .idea/
-# step4 demo 生成的向量库（运行产物）
-step4_rag/data/
 
-# step5 demo 生成的向量库（运行产物）
-step5_app/data/
+# 各 step demo 生成的向量库（运行产物）
+step2_index/data/
+step3_rag/data/
+step4_app/data/

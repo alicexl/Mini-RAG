@@ -1,23 +1,25 @@
-"""Step 4: 完整 RAG —— 检索增强生成
+"""Step 3: 完整 RAG —— 检索增强生成
 
 学习目标:
-- 把 step1(embedding) + step2(切块) + step3(向量库检索) + LLM 生成 拼成一个完整的 RAG
+- 把 step1(分块+向量化) + step2(向量库检索) + LLM 生成 拼成一个完整的 RAG
+- 两级检索：向量召回宽进（Top-20）→ rerank 精排收紧（Top-3），失败自动降级
 - RAG 里「增强（Augmented）」那一步到底做了什么：把检索回来的 chunk 作为 context 塞进 prompt
 - 「给 LLM 看检索结果再回答」的完整链路长什么样
 
 用法（两个命令，按用户场景划分）:
     # ① 导入单个文档：拆分 + 向量化 + 入库（幂等：同来源已导入则跳过，来源名取文件名）
-    python -X utf8 step4_rag/demo.py ingest <文档路径>
+    python -X utf8 step3_rag/demo.py ingest <文档路径>
 
     # ② 启动交互式问答 terminal（quit / exit 退出）
-    python -X utf8 step4_rag/demo.py chat
+    python -X utf8 step3_rag/demo.py chat
 
 依赖:
-- Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用，同 step1/3）
+- Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用，同 step1/2）
 - 一个 chat 模型。默认走智谱 GLM 的 Anthropic 兼容网关（glm-5.3）。API Key 三种配置：
   ① 环境变量 ANTHROPIC_API_KEY（推荐）；② 改 demo.py 顶部 API_KEY 常量；
   ③ 都没设 → 运行时交互式输入（仅本次运行有效）。换模型/网关用
   ANTHROPIC_BASE_URL / ANTHROPIC_CHAT_MODEL 覆盖。
+- rerank 走智谱开放平台原生 API（与生成共用同一个智谱 Key）。
 """
 
 import argparse
@@ -30,10 +32,14 @@ import numpy as np
 import requests
 from anthropic import Anthropic
 
-# 向量库持久化目录（chunks.json + embeddings.npy + metadata.json 三件套，同 step3）
+# 向量库持久化目录（chunks.json + embeddings.npy + metadata.json 三件套，同 step2）
 DATA_DIR = Path(__file__).parent / "data"
 
-# ===== Embedder（同 step1，内联以便 demo 自包含）=====
+# 两级检索的宽度：粗排宽进捞多少、精排收紧留几条（进 prompt 的条数）
+RECALL_K = 20
+TOP_K = 3
+
+# ===== Embedder（同 step1 上半，内联以便 demo 自包含）=====
 # 把文本喂给 Ollama 的 embedding 模型拿回向量；model/base_url 从环境变量读，默认连本地 Ollama。
 _DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _DEFAULT_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
@@ -55,7 +61,7 @@ class Embedder:
         return resp.json()["embeddings"]
 
 
-# ===== RecursiveTextSplitter（同 step2，内联以便 demo 自包含）=====
+# ===== RecursiveTextSplitter（同 step1 下半，内联以便 demo 自包含）=====
 # 按分隔符优先级切（段落→换行→句号→…→空格→空串兜底），尽量让每块落在语义边界。
 class RecursiveTextSplitter:
     # 按优先级从高到低排列的分隔符：段落 → 换行 → 句号 → … → 空格 → 空串（字符级兜底，必须放末尾）
@@ -119,7 +125,7 @@ class RecursiveTextSplitter:
         return chunks
 
 
-# ===== VectorStore（同 step3，内联以便 demo 自包含）=====
+# ===== VectorStore（同 step2，内联以便 demo 自包含）=====
 # data/ 目录下三个文件：原文 chunks.json、向量 embeddings.npy、元信息 metadata.json。
 # 元信息记每块的来源（哪份文档），检索命中后知道答案出自哪。
 class VectorStore:
@@ -191,6 +197,7 @@ class Generator:
                 raise SystemExit("未提供 API Key，退出")
         self.client = Anthropic(base_url=base_url, api_key=api_key)
         self.model = model
+        self.api_key = api_key      # 原始 key 留一份：rerank 走原生 API 时复用（Bearer 认证）
 
     def answer(self, system: str, user: str, max_tokens: int = 1024) -> str:
         resp = self.client.messages.create(
@@ -203,6 +210,36 @@ class Generator:
         return "".join(b.text for b in resp.content if b.type == "text")
 
 
+# ===== Reranker：Cross-Encoder 精排（本 step 的另一半新东西）=====
+# 向量召回是「双塔」（bi-encoder）：查询和文档各自编码、只比余弦——快（文档向量离线算好），
+# 但两边从没「见过面」，只会判断「话题像」。rerank 是 Cross-Encoder：「查询 + 候选」拼成
+# 一条文本一起过模型，直接输出一个相关性分——两边词逐个对照，能判断「这块到底答没答这个问题」。
+# 准也贵在「拼在一起」：分数依赖当前查询、没法预计算，所以只对召回回来的几十条跑，不碰全库——
+# 这就是两级检索的分工：粗排（向量，宽进保召回）→ 精排（rerank，收紧保精度）。
+# 走智谱开放平台的 rerank 原生 API，与生成（Anthropic 兼容网关）共用同一个智谱 Key。
+_RERANK_URL = "https://open.bigmodel.cn/api/paas/v4/rerank"
+
+
+class Reranker:
+    """调 rerank API 给候选文档按相关性重新打分排序。"""
+
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise ValueError("rerank 需要智谱 API Key（与生成共用 ANTHROPIC_API_KEY）")
+        self.api_key = api_key
+
+    def rerank(self, query: str, documents: list[str], top_n: int = TOP_K) -> list[dict]:
+        """返回按相关性降序的 [{index, relevance_score}, ...]，index 指回 documents 的下标。"""
+        resp = requests.post(
+            _RERANK_URL,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={"model": "rerank", "query": query, "documents": documents, "top_n": top_n},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["results"]
+
+
 # ===== RAG：把「检索」和「生成」拼起来 =====
 # system prompt 约束 LLM 只能用提供的资料回答 —— 这是「增强」的关键一半：
 # 不光要把检索结果塞进 prompt，还要明确告诉模型「只用这些、没有就说没有」，压住它凭训练记忆瞎编的冲动。
@@ -213,25 +250,44 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_context(retrieved: list[tuple[int, float, str]]) -> str:
-    """把检索回来的 Top-K chunk 拼成一段带编号的 context，喂给 LLM 当作「参考资料」。"""
-    parts = [f"[{i}] {chunk}" for i, (_, _, chunk) in enumerate(retrieved, 1)]
+def build_context(retrieved: list[tuple[int, float, float, str]]) -> str:
+    """把精排后的 Top-K chunk 拼成一段带编号的 context，喂给 LLM 当作「参考资料」。"""
+    parts = [f"[{i}] {chunk}" for i, (_, _, _, chunk) in enumerate(retrieved, 1)]
     return "\n\n".join(parts)
 
 
+def retrieve(question: str, store: VectorStore, embedder: Embedder,
+             reranker: Reranker, top_k: int = TOP_K) -> tuple[list[tuple[int, float, float, str]], bool]:
+    """两级检索：向量召回 RECALL_K 条（粗排）→ rerank 精排取 top_k（收紧）。
+
+    rerank 失败自动降级——直接用向量顺序的前 top_k，检索不中断。
+    返回 (结果, 是否精排成功)；每条结果为 (chunk下标, 向量sim, 精排score, 原文)，
+    降级时 score 就是向量 sim（两个分数学术口径不同，但都能看排序）。
+    """
+    candidates = store.search(question, embedder, top_k=RECALL_K)     # 粗排：宽进
+    try:
+        results = reranker.rerank(question, [c[2] for c in candidates], top_n=top_k)
+        retrieved = [(candidates[r["index"]][0], candidates[r["index"]][1],
+                      r["relevance_score"], candidates[r["index"]][2]) for r in results]
+        return retrieved, True
+    except Exception:
+        retrieved = [(idx, sim, sim, chunk) for idx, sim, chunk in candidates[:top_k]]
+        return retrieved, False
+
+
 def rag_answer(question: str, store: VectorStore, embedder: Embedder,
-               generator: Generator, top_k: int = 3):
-    """一条完整的 RAG：检索 → 拼 prompt → 生成。"""
-    retrieved = store.search(question, embedder, top_k=top_k)      # Retrieval
+               generator: Generator, reranker: Reranker, top_k: int = TOP_K):
+    """一条完整的 RAG：两级检索 → 拼 prompt → 生成。"""
+    retrieved, reranked = retrieve(question, store, embedder, reranker, top_k=top_k)   # Retrieval
     context = build_context(retrieved)                             # Augmented（把检索结果拼进 prompt）
     user = f"【参考资料】\n{context}\n\n【用户问题】\n{question}"
     answer = generator.answer(SYSTEM_PROMPT, user)                 # Generation
-    return retrieved, answer, context
+    return retrieved, reranked, answer, context
 
 
 # ===== 命令一：ingest —— 导入单个文档 =====
 def cmd_ingest(doc_path: str):
-    """读文档 → 切块(step2) → 向量化(step1) → 入库(step3)。
+    """读文档 → 切块(step1下半) → 向量化(step1上半) → 入库(step2)。
 
     来源名取文件名（metadata 用它标注，检索结果里能看到出自哪份文档）。
     幂等：同来源已在库中则跳过（按 metadata 的 source 判定），重复导入不重复入库。
@@ -247,7 +303,7 @@ def cmd_ingest(doc_path: str):
         print(f"      要重新导入请先删掉 {DATA_DIR}/")
         return
 
-    splitter = RecursiveTextSplitter(chunk_size=200)
+    splitter = RecursiveTextSplitter(chunk_size=400, chunk_overlap=50)
     chunks = splitter.split_text(text)
     embedder = Embedder()
     try:
@@ -272,15 +328,16 @@ QUERIES = [
 
 
 def cmd_chat():
-    """交互式问答 terminal：输入问题 → 检索 Top-K（带来源）→ 拼 context → LLM 生成。"""
+    """交互式问答 terminal：输入问题 → 两级检索（带来源）→ 拼 context → LLM 生成。"""
     embedder = Embedder()
     store = VectorStore()
     if not (DATA_DIR / "chunks.json").exists():
         print("[ERROR] 向量库为空。请先导入文档：")
-        print("    python step4_rag/demo.py ingest <文档路径>")
+        print("    python step3_rag/demo.py ingest <文档路径>")
         sys.exit(1)
     store.load(str(DATA_DIR))
     generator = Generator()
+    reranker = Reranker(generator.api_key)    # 精排与生成共用同一个智谱 Key
 
     print("=" * 64)
     print(f"向量库：{len(store.chunks)} 个 chunk（检索 {embedder.model} / 生成 {generator.model}）")
@@ -296,18 +353,22 @@ def cmd_chat():
         if not q:
             continue
         try:
-            retrieved, answer, context = rag_answer(q, store, embedder, generator, top_k=3)
+            retrieved, reranked, answer, context = rag_answer(q, store, embedder,
+                                                              generator, reranker, top_k=TOP_K)
         except Exception as e:
             print(f"\n[ERROR] 生成失败：{e}")
             print("请确认已配置 chat 模型鉴权（ANTHROPIC_API_KEY / API_KEY 常量 / 交互输入）")
             continue
 
-        print("\n检索 Top-3（[1][2][3] 即 LLM 回答里「根据[1]」的引用；方括号里是元信息来源）：")
-        for i, (idx, sim, chunk) in enumerate(retrieved, 1):
+        head = f"检索：召回 {RECALL_K} → rerank 精排 → Top-{TOP_K}（[1][2][3] 即「根据[1]」的引用）"
+        if not reranked:
+            head += "\n[WARN] rerank 失败，降级用向量顺序（sim 即 score）"
+        print(f"\n{head}：")
+        for i, (idx, sim, score, chunk) in enumerate(retrieved, 1):
             src = store.metadata[idx].get("source", "")
             raw = chunk.replace("\n", "↵")
-            preview = raw[:46] + ("…" if len(raw) > 46 else "")
-            print(f"  [{i}] sim={sim:.3f} [{src}] {preview}")
+            preview = raw[:40] + ("…" if len(raw) > 40 else "")
+            print(f"  [{i}] sim={sim:.3f} score={score:.3f} [{src}] {preview}")
         # 增强：把检索结果拼成 prompt 喂给 LLM —— RAG 的关键一步（检索结果 → prompt）
         print("\n→ 拼 prompt 喂给 LLM（增强 = 检索结果 + system 约束）：")
         print("  [system] 只能用【参考资料】，引用编号（如「根据[1]」），没有就说没有")
@@ -319,7 +380,7 @@ def cmd_chat():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Step 4: 完整 RAG —— 检索增强生成")
+    parser = argparse.ArgumentParser(description="Step 3: 完整 RAG —— 检索增强生成")
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="{ingest,chat}")
 
     p_ingest = sub.add_parser("ingest", help="导入单个文档（拆分 + 向量化 + 入库，幂等）")

@@ -72,7 +72,7 @@
     <label for="file" class="btn primary">导入</label>
     <button id="clear" class="btn danger">清空</button>
     <div id="upload-note"></div>
-    <p class="hint">示例语料在 step5_app/sample_reports/（三份年报节选，可多选）</p>
+    <p class="hint">示例语料在 step4_app/sample_reports/（三份年报节选，可多选）</p>
   </aside>
 
   <!-- 右栏：来源 + 聊天 + 输入 -->
@@ -140,11 +140,11 @@ function addBubble(role, text) {
   return div;
 }
 
-function renderSources(sources) {
+function renderSources(sources, reranked) {
   const box = $("sources");
-  box.textContent = "本次检索来源（Top-3，即 LLM 回答里「根据[1]」的出处）：\n";
+  box.textContent = `本次检索来源（召回 20 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用向量顺序"}）：\n`;
   for (const s of sources) {
-    box.textContent += `\n[${s.i}] sim=${s.sim} · ${s.source}\n    ${s.preview}…`;
+    box.textContent += `\n[${s.i}] sim=${s.sim} score=${s.score} · ${s.source}\n    ${s.preview}…`;
   }
 }
 
@@ -188,7 +188,7 @@ $("ask").addEventListener("submit", async (e) => {
           if (line.startsWith("data: ")) data += line.slice(6);
         }
         const payload = data ? JSON.parse(data) : {};
-        if (event === "sources") renderSources(payload.sources);
+        if (event === "sources") renderSources(payload.sources, payload.reranked);
         else if (event === "delta") { answer += payload.text; bubble.textContent = answer; }
         else if (event === "error") { bubble.textContent = "⚠️ " + payload.message; }
         else if (event === "done") {
