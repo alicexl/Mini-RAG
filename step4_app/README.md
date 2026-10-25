@@ -1,11 +1,11 @@
 # Step 4 — 手写一个 Web 聊天界面：把 RAG 做成产品
 
-> Flask Web 界面 + SSE 流式生成 + 文档上传——浏览器打开就能问，答案一个字一个字往外吐。
+> Flask Web 界面 + SSE 流式生成 + 文档上传 + 检索底座换 Milvus Lite——浏览器打开就能问，答案一个字一个字往外吐。
 > 四步路径与各步概览见仓库根目录 [README](../README.md)。
 
 ## 快速开始
 
-前提同 [Step 3](../step3_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成与 rerank 共用同一个 Key）。注意 Web 请求处理里没有 stdin，Key 只认环境变量 / 常量 / 启动时的交互确认（见 §2 改造②），没配会在生成时报错、以 SSE error 事件显示在聊天气泡里：
+前提同 [Step 3](../step3_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成与 rerank 共用同一个 Key）+ `pip install -r requirements.txt`（本步新增 pymilvus / milvus-lite）。注意 Web 请求处理里没有 stdin，Key 只认环境变量 / 常量 / 启动时的交互确认（见 §2 改造②），没配会在生成时报错、以 SSE error 事件显示在聊天气泡里。另：Milvus Lite 一次只允许一个进程打开 `data/mini_rag.db`（文件锁），别开 Flask 的 debug reloader——它会起父子两个进程抢锁：
 
 ```bash
 set ANTHROPIC_API_KEY=你的智谱key    # macOS/Linux 用 export
@@ -46,14 +46,14 @@ python -X utf8 step4_app/demo.py    # → 浏览器自动打开 http://127.0.0.1
    │  HTTP
 Flask Web 层（demo.py：5 个路由）
    │  函数调用
-RAG 内核（step3 原样：两级检索 → 拼 context → system 约束 → 生成）
+RAG 内核（两级检索 → 拼 context → system 约束 → 生成；底座换 Milvus，见 §2 改造④）
 ```
 
 ---
 
-## 2. 动手：三个产品化改造
+## 2. 动手：四个产品化改造
 
-RAG 的核心类（`Embedder` / `RecursiveTextSplitter` / `VectorStore` / `BM25Index` + `rrf_merge` / `Reranker`）和 `SYSTEM_PROMPT` / `build_context` / `retrieve` 都和 step3 一样，本 step 不动它们（demo.py 里原样内联）。新增的代码就两类：**流式的 Generator** 和 **Flask 的 Web 层**。唯一沾 RAG 内核的一行：`_ingest_text` 入库后**重建 BM25 索引**（稀疏路索引跟着库走，上传/清空后同步重建，百级 chunk 毫秒级）。
+前 3 步把原理摊开讲完了，这一步在产品化的同时做一次「零件升级」：`Embedder` / `RecursiveTextSplitter` / `Reranker` / `SYSTEM_PROMPT` / `build_context` 原样内联复用；**step3 手搓的检索三件套 `VectorStore`（JSON+numpy 余弦）/ `BM25Index`（手写 Okapi）/ `rrf_merge`（名次归并）整体退休**，换成一个 `MilvusStore`（见改造④）。新增的代码就两类：**流式的 Generator** 和 **Flask 的 Web 层**。
 
 ### 改造①：Web 聊天界面（路由 + 静态页）
 
@@ -147,16 +147,64 @@ for f in files:
 
 ```python
 def _ingest_text(text, source):
-    if any(m.get("source") == source for m in store.metadata):
+    if store.has_source(source):        # 库内标量过滤查询，替代 step3 扫 metadata 列表
         return 0, False, f"[SKIP]「{source}」已在库中"
     ...
 ```
 
 值得强调的是「真上传」三个字：文件框由**浏览器**弹出（在你自己的电脑上选文件），内容随请求传到服务端——服务端只收内容、不碰服务端文件系统，**本地跑和部署到远端行为完全一致**。demo 框架图省事时常见另一种做法（服务端代码直接弹个框、拿本地路径读文件），本地演示看不出差别，一旦部署到远端服务器，框会弹在服务器上没人点。
 
+### 改造④：检索底座工程化（Milvus Lite）
+
+前三步的检索底座是手搓的：`VectorStore` 把余弦摊成矩阵乘、`BM25Index` 把 Okapi 公式写成循环、`rrf_merge` 把名次融合写成十行——教学价值就在「没有黑盒」。但它们毕竟是教具：线性扫描扛不住百万 chunk、BM25 索引每次启动现建、三件套要自己 save/load。工程端的答案是**向量数据库**——这里换成 Milvus Lite（Milvus 的嵌入式单文件版，`pip install milvus-lite` 即用，不用装服务）。概念与 step3 一一对应，零件换生产件：
+
+| step3 手搓件 | Milvus 里对应的东西 |
+|---|---|
+| `VectorStore`：npy 存向量 + 归一化点积 | `vector` 字段 + HNSW 索引（`metric_type="COSINE"`），大规模走近似检索 |
+| `BM25Index`：jieba 分词 + 手写 Okapi | `text` 字段开 jieba 分析器 + BM25 函数，插原文、库内自动分词建稀疏索引 |
+| `rrf_merge`：名次折算 1/(k+rank) | `hybrid_search(..., ranker=RRFRanker(60))` 一个参数 |
+| 三件套 save/load + 上传后重建 BM25 | 落库即持久化（WAL），稀疏索引自动更新 |
+| 扫 metadata 列表判幂等 | 标量过滤查询 `filter='source == "xxx"'` |
+
+一张 collection 把「原文 + 向量 + 稀疏 + 元信息」全装下，schema 建一次、之后只管插和查：
+
+```python
+schema.add_field("text", DataType.VARCHAR, max_length=65535,
+                 enable_analyzer=True, analyzer_params={"type": "jieba"})  # 中文按词切
+schema.add_field("sparse", DataType.SPARSE_FLOAT_VECTOR)      # BM25 函数的输出位，不用手填
+schema.add_function(Function(name="bm25", function_type=FunctionType.BM25,
+                             input_field_names=["text"], output_field_names=["sparse"]))
+schema.add_field("vector", DataType.FLOAT_VECTOR, dim=1024)   # qwen3-embedding 维度
+schema.add_field("source", DataType.VARCHAR, max_length=256)  # 来源文件名（幂等键）
+```
+
+检索侧两路各带一个 `AnnSearchRequest`，融合交给 `RRFRanker`——step3 里手写的那十行，在这里是一个参数：
+
+```python
+dense = AnnSearchRequest(data=[query_vec], anns_field="vector",
+                         param={"metric_type": "COSINE"}, limit=20)
+sparse = AnnSearchRequest(data=[query], anns_field="sparse",   # 查询原文进来，库内 jieba 分词
+                          param={"metric_type": "BM25"}, limit=20)
+hits = client.hybrid_search("docs", [dense, sparse],
+                            ranker=RRFRanker(60), limit=20,
+                            output_fields=["text", "source"])
+```
+
+**rerank 仍留在库外**（`retrieve()` 接着调智谱 rerank API）——精排要过一遍 Cross-Encoder 大模型，向量库不管这件事；失败降级回融合顺序，语义同 step3。
+
+工程件不是白拿的，三个已知边界：
+
+- **Windows 安装坑**：`pip install "pymilvus[milvus-lite]"` 在 Windows 上**装不上 milvus-lite**——pymilvus 给这个 extra 挂了 `sys_platform != 'win32'` 标记（C++ 老版本的遗留），直接单装 `milvus-lite` 即可（新一代是纯 Python 实现）。requirements.txt 里两行分开写。
+- **BM25 的 IDF 是 segment 局部统计**（官方已知限制），不是 step3 手搓的全库 IDF——分数有微小差异，排序影响可忽略。
+- **单进程文件锁**：一个 data 目录同一时刻只允许一个进程打开——本 demo 单进程没事，但别开 debug reloader（父子两进程抢锁）。
+
+「生产同款」的真正含义：把 `MilvusStore` 里的 db 路径换成 `http://localhost:19530`（Milvus Standalone，Docker 起）或 Zilliz Cloud 的 uri，其余 API 一行不改——教学件到生产件的迁移路径就是换一个连接串。
+
+来源面板也随之变干净：不再显示 `sim`（向量相似度）和路由标记（手搓三段式的讲解道具），只留 `rrf`（库内融合分）+ `score`（rerank 精排分）+ 出处。
+
 ### 跑起来
 
-前提同 step3：Ollama 已启动（qwen3-embedding:0.6b），Key 设成环境变量，然后 `python -X utf8 step4_app/demo.py`。首次启动状态栏是空的；若 `data/` 里留着上次入库的向量库，启动时会直接加载。点「导入」选中 `sample_reports/` 下的三份年报节选（可多选）：
+前提同 step3：Ollama 已启动（qwen3-embedding:0.6b），Key 设成环境变量，然后 `python -X utf8 step4_app/demo.py`。首次启动自动创建空库 `data/mini_rag.db`；库里留着上次的数据则直接接着用（落库即持久化，重启不丢）。点「导入」选中 `sample_reports/` 下的三份年报节选（可多选）：
 
 ```
 [OK]「盐湖股份2023年年报（节选）」+39 块
@@ -164,21 +212,21 @@ def _ingest_text(text, source):
 [OK]「盐湖股份2025年年报（节选）」+42 块
 ```
 
-然后在右栏问「公司2024年经营活动现金流量净额是多少？」——来源面板先亮出来（向量 + BM25 两路召回 → RRF 融合 → rerank 精排 → Top-3，即 LLM 回答里「根据[1]」的出处；`sim` 是向量相似度、`score` 是精排分、方括号里的路由标记说明这块从哪路召回），紧接着答案开始流式往外吐：
+然后在右栏问「公司2024年赚了多少钱？」——来源面板先亮出来（Milvus 两路召回 → RRF 融合 → rerank 精排 → Top-3，即 LLM 回答里「根据[N]」的出处；`rrf` 是库内融合分、`score` 是精排分），紧接着答案开始流式往外吐：
 
 ```
-本次检索来源（向量+BM25 两路召回 → RRF 融合 → rerank 精排 → Top-3）：
-  [1] sim=0.580 score=1.0 [两路]  盐湖股份2025年年报（节选）
-  [2] sim=0.658 score=1.0 [两路]  盐湖股份2024年年报（节选）
-  [3] sim=0.721 score=1.0 [两路]  盐湖股份2024年年报（节选）
+本次检索来源（Milvus 两路召回：稠密向量 + BM25 → RRF 融合 → rerank 精排 → Top-3）：
+  [1] rrf=0.0154 score=1.0 · 盐湖股份2024年年报（节选）
+  [2] rrf=0.0164 score=1.0 · 盐湖股份2024年年报（节选）
+  [3] rrf=0.0282 score=1.0 · 盐湖股份2024年年报（节选）
 
 助手（流式）：
-根据[1][2]，公司2024年经营活动产生的现金流量净额为 **7,819,152,860.43元**（约78.19亿元）。
-
-补充信息：根据[1]，该数值较2023年（12,104,618,721.68元）同比下降约35.40%[2]。
+根据[3]（盐湖股份2024年年报），公司2024年的盈利情况如下：
+- 归属于上市公司股东的净利润：4,663,116,528.38元（约46.63亿元），同比下降41.07%
+- 扣除非经常性损益的净利润：4,400,518,590.09元（约44.01亿元），同比下降49.56%
 ```
 
-三个块全标 `[两路]`——「经营活动/现金流量净额/2024年」这些词语义和字面双双命中，RRF 给了它们双倍名次分。注意 [1] 出自 2025 年报的对比列（同时装着 2024 和 2025 两年数据），答案也因此带上了双来源校验（「根据[1][2]」）。
+看 rerank 在干什么：融合分最高的 [3]（rrf=0.0282，两路都命中了「主要会计数据」大块）正是回答的依据——营收、净利、扣非一次抽全；而融合名次靠前的两块现金流内容被精排压到 [1][2]。`rrf` 的量纲也读得出来：单路命中 ≈ 1/(60+名次) ≈ 0.016，两路命中叠加到 0.028+。
 
 线路上传的是一帧一帧的 SSE（另一次提问的实测帧节选）：
 
@@ -214,6 +262,6 @@ data: {}
 1. **[基础件](../step1_basics/README.md)**：分块（递归切分保语义边界）+ 向量化（Embedding，余弦相似度找语义接近）。
 2. **[向量库](../step2_index/README.md)**：JSON + numpy 存 chunk 和向量，从零实现检索。
 3. **[完整 RAG](../step3_rag/README.md)**：混合检索（向量 + BM25 两路召回、RRF 融合、rerank 精排）+ 拼 context + system 约束 + LLM 生成，闭环 + 防幻觉两道关。
-4. **聊天界面**（本 step）：Flask 手写 Web 层，SSE 流式 + 文档上传。UI 仅为产品化演示，RAG 内核仍是 step3 的实现。
+4. **聊天界面 + 工程底座**（本 step）：Flask 手写 Web 层，SSE 流式 + 文档上传；检索底座从手搓三件套换成 Milvus Lite。UI 与底座是产品化演示，链路概念仍是 step3 那套。
 
-一套朴素 RAG 的骨架就这么搭起来了。它每个零件都最简、都看得见——embedding 是一次 HTTP 调用、分块是递归切分隔符、向量库是余弦点积、检索是召回 + 精排、生成是拼 prompt 喂 LLM、Web 层是 5 个路由 + 一段 SSE。没有黑盒。
+一套朴素 RAG 的骨架就这么搭起来了。前三步每个零件都最简、都看得见——embedding 是一次 HTTP 调用、分块是递归切分隔符、向量库是余弦点积、检索是召回 + 精排、生成是拼 prompt 喂 LLM。第四步在看清每个零件内部是什么之后，把存储与检索底座换成工业件（Milvus）、外面加上 5 个路由 + 一段 SSE 的 Web 层——先没有黑盒，再心安理得地用黑盒。

@@ -37,7 +37,7 @@
 
   /* 右栏：来源 + 聊天 + 输入 */
   #chat-area { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-  #sources { color: #57606a; max-height: 130px; overflow-y: auto; white-space: pre-wrap; }
+  #sources { color: #57606a; max-height: 220px; overflow-y: auto; white-space: pre-wrap; }
   #chat {
     flex: 1; min-height: 380px; max-height: 55vh; overflow-y: auto; padding: 12px;
     background: #fff; border: 1px solid #e1e4e8; border-radius: 8px;
@@ -142,10 +142,10 @@ function addBubble(role, text) {
 
 function renderSources(sources, reranked) {
   const box = $("sources");
-  box.textContent = `本次检索来源（向量+BM25 两路召回 → RRF 融合 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用 RRF 顺序"}）：\n`;
+  box.textContent = `本次检索来源（Milvus 两路召回：稠密向量 + BM25 → RRF 融合 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用融合顺序"}）：\n`;
   for (const s of sources) {
-    const sim = (s.sim === null || s.sim === undefined) ? "  - " : s.sim;
-    box.textContent += `\n[${s.i}] sim=${sim} score=${s.score} [${s.route}] · ${s.source}\n    ${s.preview}…`;
+    const score = (s.score === null || s.score === undefined) ? "-" : s.score;
+    box.textContent += `\n[${s.i}] rrf=${s.rrf} score=${score} · ${s.source}\n    ${s.preview}…`;
   }
 }
 
