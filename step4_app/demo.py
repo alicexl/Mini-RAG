@@ -367,7 +367,9 @@ def parse_pdf(data: bytes, source: str, vlm_key: str) -> tuple[list[dict], int]:
                     desc = "（图片，VLM 描述生成失败）"
                 page_parts.append(f"〔图：{desc[:40]}…〕")
                 standalone.append({"text": f"图片描述：{desc}", "chunk_type": "image",
-                                   "content": f"{desc}\n（原图：{fname}）", "page": pno})
+                                   # 标记行不定界（无括号包裹）：文件名可含全角括号等字符，
+                                   # 按行尾提取永不截断——用成对括号当定界符会被文件名里的括号截断
+                                   "content": f"{desc}\n原图文件：{fname}", "page": pno})
         if page_parts:
             stream.append("\n\n".join(page_parts))
     # 正文流切块：text 版剥标记、content 版还原 HTML；正文 chunk 可能跨页，page 记 0（不标注）
@@ -599,7 +601,7 @@ def chat():
     llm_messages = history + [{"role": "user", "content": user_msg}]
     sources_payload = []
     for i, e in enumerate(retrieved, 1):
-        m = re.search(r"（原图：(.+?)）", e["content"]) if e["type"] == "image" else None
+        m = re.search(r"原图文件：(.+)$", e["content"], re.M) if e["type"] == "image" else None
         sources_payload.append({
             "i": i, "rrf": round(e["rrf"], 4),
             "score": (round(e["score"], 3) if e["score"] is not None else None),
