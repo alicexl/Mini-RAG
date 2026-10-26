@@ -9,7 +9,7 @@
 | 1 | **基础件**：分块（递归切分保语义边界 + overlap）与向量化（Embedding + 余弦相似度） | [step1_basics/README.md](step1_basics/README.md) |
 | 2 | **向量库**：JSON + numpy 存 chunk 和向量，从零实现检索 | [step2_index/README.md](step2_index/README.md) |
 | 3 | **完整 RAG**：混合检索（向量 + BM25 两路召回 → RRF 融合 → rerank 精排）+ 拼 context + system 约束 + 生成 | [step3_rag/README.md](step3_rag/README.md) |
-| 4 | **聊天界面 + 工程底座**：Flask 手写 Web（SSE 流式 + 上传），检索底座换 Milvus Lite 向量库 | [step4_app/README.md](step4_app/README.md) |
+| 4 | **聊天界面 + 工程底座 + 多模态**：Flask 手写 Web（SSE 流式 + 上传），检索底座换 Milvus Lite 向量库，PDF 直接入库（正文/表格/图片三模态） | [step4_app/README.md](step4_app/README.md) |
 
 每个 `demo.py` 自包含、可独立运行，不依赖共享库。
 
@@ -18,7 +18,7 @@
 - Python 3.10+（开发环境 3.12），`pip install -r requirements.txt`
 - **检索（本地）**：[Ollama](https://ollama.com) 已启动，`ollama pull qwen3-embedding:0.6b`——离线、免 key
 - **向量库（step4）**：Milvus Lite，`pip install -r requirements.txt` 自带（纯 Python 实现，单文件库，无需装服务）
-- **生成 + 精排（远程）**：智谱 API Key（[bigmodel.cn](https://bigmodel.cn) 生成，`id.secret` 格式）。生成走 GLM 的 Anthropic 兼容网关（默认 `glm-5.3`），rerank 走智谱 rerank API（`rerank` 模型）——两者共用同一个 Key
+- **生成 + 精排 + 图片描述（远程）**：智谱 API Key（[bigmodel.cn](https://bigmodel.cn) 生成，`id.secret` 格式）。生成走 GLM 的 Anthropic 兼容网关（默认 `glm-5.3`），rerank 走智谱 rerank API（`rerank` 模型），step4 的 PDF 图片描述走 VLM（默认 `glm-4v-flash`，免费档）——三者共用同一个 Key
 
 ## 快速开始
 
@@ -44,7 +44,7 @@ python -X utf8 step4_app/demo.py    # → http://127.0.0.1:7860
 
 ## 示例语料
 
-`step3_rag/sample_reports/` 与 `step4_app/sample_reports/` 内置盐湖股份 2023-2025 年报节选（`build_excerpts.py` 从年报 PDF 提取生成），拿来即可跑通完整链路。
+`step3_rag/sample_reports/` 与 `step4_app/sample_reports/` 内置盐湖股份 2023-2025 年报节选（`build_excerpts.py` 从年报 PDF 提取生成），拿来即可跑通完整链路。step4 另有一份 `盐湖股份2024年报（精选页）.pdf`（`tools/extract_pages.py` 从真年报抽 10 页），用来演示多模态检索：表格问题命中表格块（HTML 原文回填）、图片问题命中图片块（VLM 描述 + 原图回显）。
 
 ## 朴素优先
 

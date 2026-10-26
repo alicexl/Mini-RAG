@@ -68,11 +68,11 @@
   <aside id="side">
     <div id="status" class="card">加载中…</div>
     <!-- 浏览器原生文件框：hidden 掉 input 本体，label 当按钮用；multiple 支持一次多选 -->
-    <input type="file" id="file" multiple accept=".md,.txt" hidden>
+    <input type="file" id="file" multiple accept=".md,.txt,.pdf" hidden>
     <label for="file" class="btn primary">导入</label>
     <button id="clear" class="btn danger">清空</button>
     <div id="upload-note"></div>
-    <p class="hint">示例语料在 step4_app/sample_reports/（三份年报节选，可多选）</p>
+    <p class="hint">示例语料在 step4_app/sample_reports/（年报精选页 PDF 含表格图片，md 节选为纯文本）</p>
   </aside>
 
   <!-- 右栏：来源 + 聊天 + 输入 -->
@@ -140,12 +140,25 @@ function addBubble(role, text) {
   return div;
 }
 
+const TYPE_TAG = { text: "正文", table: "表格", image: "图片" };
+
 function renderSources(sources, reranked) {
   const box = $("sources");
   box.textContent = `本次检索来源（Milvus 两路召回：稠密向量 + BM25 → RRF 融合 → rerank 精排 → Top-3${reranked ? "" : "，rerank 失败已降级用融合顺序"}）：\n`;
+  const images = [];
   for (const s of sources) {
     const score = (s.score === null || s.score === undefined) ? "-" : s.score;
-    box.textContent += `\n[${s.i}] rrf=${s.rrf} score=${score} · ${s.source}\n    ${s.preview}…`;
+    const page = s.page ? ` p${s.page}` : "";
+    box.textContent += `\n[${s.i}]（${TYPE_TAG[s.type] || "正文"}）rrf=${s.rrf} score=${score} · ${s.source}${page}\n    ${s.preview}…`;
+    if (s.image) images.push(s.image);   // 图片 chunk：下面回显原图
+  }
+  // 命中图片时展示原件：src 是服务端受控文件名（非用户文本），img 元素直接建、不走 innerHTML
+  for (const f of images) {
+    const img = document.createElement("img");
+    img.src = "/api/media/" + encodeURIComponent(f);
+    img.alt = f;
+    img.style.cssText = "max-width:200px;display:block;margin:8px 0 0;border:1px solid #e1e4e8;border-radius:6px";
+    box.appendChild(img);
   }
 }
 
