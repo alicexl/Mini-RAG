@@ -9,7 +9,7 @@
 | 1 | **基础件**：分块（递归切分保语义边界 + overlap）与向量化（Embedding + 余弦相似度） | [step1_basics/README.md](step1_basics/README.md) |
 | 2 | **向量库**：JSON + numpy 存 chunk 和向量，从零实现检索 | [step2_index/README.md](step2_index/README.md) |
 | 3 | **完整 RAG**：混合检索（向量 + BM25 两路召回 → RRF 融合 → rerank 精排）+ 拼 context + system 约束 + 生成 | [step3_rag/README.md](step3_rag/README.md) |
-| 4 | **聊天界面 + 工程底座 + 多模态**：Flask 手写 Web（SSE 流式 + 上传），检索底座换 Milvus Lite 向量库，PDF 直接入库（正文/表格/图片三模态） | [step4_app/README.md](step4_app/README.md) |
+| 4 | **聊天界面 + 工程底座 + 多模态 + 评测**：Flask 手写 Web（SSE 流式 + 上传），检索底座换 Milvus Lite 向量库，PDF 直接入库（正文/表格/图片三模态），分层评测集 + 两层判分让检索质量有数字 | [step4_app/README.md](step4_app/README.md) |
 
 每个 `demo.py` 自包含、可独立运行，不依赖共享库。
 
@@ -40,6 +40,7 @@ step4 起 Web 界面，浏览器自动打开：
 
 ```bash
 python -X utf8 step4_app/demo.py    # → http://127.0.0.1:7860
+python -X utf8 step4_app/eval.py    # 评测：15 条分层 case，检索命中 / 答案断言 / pass@N
 ```
 
 ## 示例语料
