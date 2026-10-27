@@ -234,15 +234,16 @@ schema 相应加三个字段（`chunk_type` / `content` / `page`），旧库自�
 钉钉服务器 ←—WebSocket（出站）—→ bot 线程（与 Flask 同进程，见下）
                                     │ conversation_id + 文本
                                     ├─ SQLite 取该会话最近 3 轮（服务端会话）
-                                    ├─ retrieve → build_context → 非流式生成
+                                    ├─ 先发 AI 卡片占位（「执行中」）
+                                    ├─ retrieve → build_context → 流式生成边收边写卡片（打字机）
                                     ├─ 本轮问答落库（来源/延迟/token = 使用日志）
-                                    └─ markdown 回复：答案 + [N] 来源脚注
+                                    └─ ai_finish 定稿：答案 + [N] 来源脚注
 ```
 
 三个设计点，每个都有对照：
 
 - **会话状态从「前端持有」换成「服务端持有」**。改造② 里 Web 端的 history 由浏览器持有、随请求上送（无状态服务）；机器人没有「前端」，会话必须服务端存——SQLite 按 `conversation_id` 隔离（单聊/群聊天然分开），入史的是**原始问题**（不带参考资料，防多轮滚雪球，与 Web 端同口径）。这是聊天平台替你藏掉的另一半：现在两边都摊开过了。
-- **先 ACK 再异步回答**。生成延迟中位 5s、P95 可到 20s+，而 SDK 的 `process` 同步等完会触发钉钉**超时重推**（官方 issue 实锤）。所以收到消息立刻返回 ACK，生成丢线程池异步做，答完经消息自带的 `session_webhook` 回复；另按 `message_id` 去重挡住仍可能到达的重推。流式 SSE 在这里没有意义——机器人回复是整条消息，生成走非流式（同 eval 探针口径，顺手拿到 token 用量）。
+- **先 ACK 再异步回答，回复用 AI 卡片打字机**。生成延迟中位 5s+、P95 可到 20s，而 SDK 的 `process` 同步等完会触发钉钉**超时重推**（官方 issue 实锤）——所以收到消息立刻返回 ACK，生成丢线程池异步做；另按 `message_id` 去重挡住仍可能到达的重推。回复不再是「等全生成完一次性蹦出」：先发一张「执行中」卡片占位，生成走**流式**（`messages.stream`）边收边往卡片写（`ai_streaming` 的 `append=False` 是全量替换语义，配 ~1s 节流），最后 `ai_finish` 定稿带来源脚注；卡片创建失败自动降级为整条 markdown 回复。生成同时**关掉了思考块**（`thinking: disabled`）——语料数值问答不需要长思考，实测单次快 ~30%、思考 tokens 全省；token 用量从流的 `get_final_message()` 拿（在 with 块内，流式也能记账）。关思考后的质量抽查 4/4：两组财务数值、每股收益、锂价趋势、化学式拒答全对。
 - **history 表就是使用日志**。每轮把问题、答案、命中来源、延迟、token 落库——「检索质量」坏例的排查、真实 query 分布的积累，都从这张表长出来。小范围落地最先该有的不是功能，是这张表。
 - **一个 `__main__` 双模块坑**：`python demo.py` 运行时本模块名是 `__main__`，而 bot.py 里 `import demo` 会再加载一份**没跑过 main() 的裸副本**（单例全是 AttributeError——首轮实测就撞上了）。修法一行：起 bot 线程前 `sys.modules["demo"] = sys.modules["__main__"]`，把入口模块注册成 demo，bot 拿到的才是同一个正在跑的模块。入口脚本 + 被别的模块 import，两顶帽子戴在一个文件上时必踩。
 

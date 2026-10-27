@@ -13,9 +13,11 @@ Stream 是**出站 WebSocket**——本进程主动连钉钉服务器，消息�
   「检索质量」坏例的排查和真实 query 分布的积累从这里长出来
 
 回复链路：收到消息 → 先 ACK 再异步回答（生成长尾 P95 可到 20s+，process
-同步等完会触发钉钉超时重推）→ 检索 + 非流式生成（同 eval.py 探针口径，
-拿 token 用量）→ markdown 回复（答案 + 引用来源脚注）。生成用非流式：
-机器人回复是整条消息，SSE 逐字推给浏览器的那套在这里没有意义。
+同步等完会触发钉钉超时重推）→ 先发一张 AI 卡片（「执行中」占位）→ 检索 →
+**流式生成边收边写卡片**（打字机；append=False 全量替换 + ~1s 节流）→
+ai_finish 定稿（答案 + 引用来源脚注）。生成关掉了思考块：语料数值问答不需要
+长思考，实测单次生成快 ~30%、思考 tokens 全省；token 用量从流的 final
+message 拿（get_final_message 在 with 块内，这正是流式也能记账的原因）。
 
 启动（不单独跑，由 demo.py 自动接线；两个 env 都设了才起 bot 线程）：
     set DINGTALK_CLIENT_ID=xxx        # 钉钉开放平台应用的 Client ID（AppKey）
@@ -80,17 +82,27 @@ def append_history(conversation_id: str, role: str, content: str,
                   (conversation_id, role, content, sources, latency_ms, tokens, time.time()))
 
 
-def generate(client: Anthropic, question: str, history: list[dict], retrieved: list[dict]):
-    """非流式生成探针：拼装口径与 chat 路由 / eval.py 完全同构，换成 messages.create
-    一把拿全文 + token 用量（流式的 usage 藏在生成器内部拿不到）。
-    glm-5.3 会带 ThinkingBlock，只取文本块。"""
+def generate_stream(client: Anthropic, question: str, history: list[dict],
+                    retrieved: list[dict], card) -> tuple[str, int]:
+    """流式生成 + AI 卡片打字机。拼装口径与 chat 路由 / eval.py 同构。
+    - thinking 关闭：数值问答不需要长思考，实测快 ~30% 且省全部思考 tokens
+    - 卡片推送按 ~1s 节流、append=False 全量替换（SDK 语义：非追加）
+    - usage 从 get_final_message() 拿——流式也能记账的关键（在 with 块内）"""
     context = demo.build_context(retrieved)
     user_msg = f"【参考资料】\n{context}\n\n【用户问题】\n{question}"
-    resp = client.messages.create(model=demo._CHAT_MODEL, max_tokens=2048,
-                                  system=demo.SYSTEM_PROMPT,
-                                  messages=history + [{"role": "user", "content": user_msg}])
-    answer = "".join(b.text for b in resp.content if b.type == "text")
-    return answer, resp.usage.input_tokens + resp.usage.output_tokens
+    buf, last_push = "", 0.0
+    with client.messages.stream(model=demo._CHAT_MODEL, max_tokens=2048,
+                                system=demo.SYSTEM_PROMPT,
+                                messages=history + [{"role": "user", "content": user_msg}],
+                                thinking={"type": "disabled"}) as s:
+        for delta in s.text_stream:
+            buf += delta
+            now = time.time()
+            if card and now - last_push >= 1.0:
+                card.ai_streaming(buf)          # 全量替换式打字机
+                last_push = now
+        usage = s.get_final_message().usage
+    return buf, usage.input_tokens + usage.output_tokens
 
 
 def build_reply(answer: str, retrieved: list[dict]) -> str:
@@ -132,16 +144,22 @@ class RAGBotHandler(dingtalk_stream.ChatbotHandler):
 
     async def _answer(self, msg: dingtalk_stream.ChatbotMessage):
         loop = asyncio.get_running_loop()
+        holder = {"card": None}                          # 异常时拿得到卡片，好调 ai_fail
         try:
-            await loop.run_in_executor(None, self._answer_sync, msg)
+            await loop.run_in_executor(None, self._answer_sync, msg, holder)
         except Exception as e:                          # 异步任务里的异常没人接，自己兜
             self.logger.error(f"[BOT] 回答失败：{e}")
+            if holder["card"]:
+                try:
+                    holder["card"].ai_fail()
+                except Exception:
+                    pass
             try:
                 self.reply_text(f"回答失败：{e}", msg)
             except Exception:
                 pass
 
-    def _answer_sync(self, msg: dingtalk_stream.ChatbotMessage):
+    def _answer_sync(self, msg: dingtalk_stream.ChatbotMessage, holder: dict):
         question = (msg.text.content if msg.text else "").strip()
         question = re.sub(r"^@\S+\s*", "", question)     # 群聊 @机器人 前缀剥掉
         nick = msg.sender_nick or msg.sender_staff_id or "?"
@@ -156,7 +174,14 @@ class RAGBotHandler(dingtalk_stream.ChatbotHandler):
         history = load_history(conv)
         t0 = time.perf_counter()
         retrieved, reranked = demo.retrieve(question, top_k=demo.TOP_K)
-        answer, tokens = generate(self.client, question, history, retrieved)
+
+        # AI 卡片先上（「执行中」占位）——失败降级为整条 markdown 回复，链路不断
+        try:
+            holder["card"] = self.ai_markdown_card_start(msg, title="Mini-RAG")
+        except Exception as e:
+            self.logger.warning(f"AI 卡片创建失败，降级整条回复：{e}")
+
+        answer, tokens = generate_stream(self.client, question, history, retrieved, holder["card"])
         latency_ms = int((time.perf_counter() - t0) * 1000)
 
         sources = json.dumps([{"i": i, "type": e["type"], "source": e["source"], "page": e["page"]}
@@ -164,7 +189,11 @@ class RAGBotHandler(dingtalk_stream.ChatbotHandler):
         append_history(conv, "user", question)           # 入史的是原始问题（同 Web 端口径）
         append_history(conv, "assistant", answer, sources=sources,
                        latency_ms=latency_ms, tokens=tokens)
-        self.reply_markdown("Mini-RAG", build_reply(answer, retrieved), msg)
+        reply_md = build_reply(answer, retrieved)
+        if holder["card"]:
+            holder["card"].ai_finish(reply_md)           # 定稿：答案 + 来源脚注
+        else:
+            self.reply_markdown("Mini-RAG", reply_md, msg)
         print(f"[BOT] {nick}: {question[:40]} → 回复 {len(answer)} 字"
               f" · {latency_ms}ms · {tokens} tokens · rerank{'正常' if reranked else '降级'}")
 
