@@ -16,7 +16,7 @@
 ## 运行前提
 
 - Python 3.10+（开发环境 3.12），`pip install -r requirements.txt`
-- **检索（本地）**：[Ollama](https://ollama.com) 已启动，`ollama pull qwen3-embedding:0.6b`——离线、免 key
+- **检索**：step1-3 用本地 [Ollama](https://ollama.com)（离线、免 key，`ollama pull qwen3-embedding:0.6b`）；step4 换智谱 embedding-3（与生成共用 Key，检索延迟 2.7s→0.9s，见 step4 README 改造④）
 - **向量库（step4）**：Milvus Lite，`pip install -r requirements.txt` 自带（纯 Python 实现，单文件库，无需装服务）
 - **生成 + 精排 + 图片描述（远程）**：智谱 API Key（[bigmodel.cn](https://bigmodel.cn) 生成，`id.secret` 格式）。生成走 GLM 的 Anthropic 兼容网关（默认 `glm-5.3`），rerank 走智谱 rerank API（`rerank` 模型），step4 的 PDF 图片描述走 VLM（默认 `glm-4v-flash`，免费档）——三者共用同一个 Key
 
@@ -27,7 +27,7 @@ set ANTHROPIC_API_KEY=你的智谱key      # macOS/Linux 用 export
 python -X utf8 step2_index/demo.py
 ```
 
-step1 的向量化部分与 step2 需要本地 Ollama（step1 的分块演示纯标准库、零依赖）；step3/4 另需智谱 key。
+step1 的向量化部分与 step2/3 需要本地 Ollama（step1 的分块演示纯标准库、零依赖）；step3 起另需智谱 key；step4 只需智谱 key（检索嵌入已换智谱 embedding-3）。
 
 step3 是两条子命令：
 
@@ -41,6 +41,10 @@ step4 起 Web 界面，浏览器自动打开：
 ```bash
 python -X utf8 step4_app/demo.py    # → http://127.0.0.1:7860
 python -X utf8 step4_app/eval.py    # 评测：15 条分层 case，检索命中 / 答案断言 / pass@N
+
+# 可选：接入钉钉机器人（Stream 模式出站连接，免公网 IP/域名/证书，见 step4 README 改造⑥）
+set DINGTALK_CLIENT_ID=xxx
+set DINGTALK_CLIENT_SECRET=xxx
 ```
 
 ## 示例语料

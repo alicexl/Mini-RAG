@@ -13,7 +13,7 @@
   pass^N）分开报——成功率上不去时，才分得清是检索没捞到还是生成没答好；
   外加过程指标（rerank 降级次数）、延迟（中位数 + P95）、成本（token）
 
-启动（前提同 demo.py：Ollama 已启动、Key 已设、库里已导入精选页 PDF）:
+启动（前提同 demo.py：智谱 Key 已设、库里已导入精选页 PDF）:
     python -X utf8 step4_app/eval.py             # 每条生成 3 次
     python -X utf8 step4_app/eval.py --runs 5
 """
@@ -81,11 +81,11 @@ def main():
 
     # 接线：demo 的单例在它的 main() 里初始化（import 零副作用），这里按同一口径
     # 赋给模块级名字——retrieve() 调用时读的就是这几个全局
-    demo.embedder = demo.Embedder()
+    demo.embedder = demo.ZhipuEmbedder(key)
     try:
         demo.embedder.embed_batch(["连通性检查"])
     except Exception as e:
-        raise SystemExit(f"Ollama embedding 不可用（{e}）：先启动 Ollama 再跑评测")
+        raise SystemExit(f"智谱 embedding 不可用（{e}）：检查 ANTHROPIC_API_KEY 与网络")
     demo.store = demo.MilvusStore(str(demo.DATA_DIR / "mini_rag.db"))
     demo.reranker = demo.Reranker(key)
     client = Anthropic(base_url=demo._CHAT_BASE_URL, api_key=key)

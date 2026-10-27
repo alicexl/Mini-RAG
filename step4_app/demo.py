@@ -2,7 +2,7 @@
 
 学习目标:
 - 把 step3 的命令行 RAG 做成一个 Web 聊天应用（Flask + 原生 HTML/JS，无前端框架）
-- 五个产品化改造：① Web 聊天界面（Flask 路由 + 静态页）
+- 六个产品化改造：① Web 聊天界面（Flask 路由 + 静态页）
   ② 流式生成（SSE，答案一个字一个字蹦出来）
   ③ 文档管理（真 HTTP 文件上传，替代 step3 的命令行 ingest）
   ④ 检索底座工程化：step3 手搓的「向量库 + BM25 + RRF」三件套，
@@ -12,13 +12,16 @@
   ⑤ 多模态检索：PDF 直接上传——正文/表格/图片三种模态同一检索空间，
     表格转 HTML 保行列结构（命中回填原文）、图片走 VLM 生成描述、
     小表格跟正文一起切上下文不丢、大表格独立成块
+  ⑥ 接入钉钉机器人（bot.py，可选）：Stream 模式出站 WebSocket 免公网；
+    会话状态从「前端持有」换成服务端 SQLite（聊天平台替你藏掉的那部分
+    又摊开一次）；history 表顺手落成使用日志（来源/延迟/token）
 - RAG 的链路概念（混合检索→拼 context→system 约束→生成）与 step3 一致：
   本章换的是零件，不是原理——对照 step3 看「同一件事的手搓版与工程版」
 
 启动:
-    # 先备好外部依赖（同 step3）：
-    #   · Ollama 已启动 + qwen3-embedding:0.6b 已下载（检索用）
-    #   · 一个 chat 模型 API Key：set ANTHROPIC_API_KEY=xxx（智谱 glm-5.3 网关）
+    # 先备好外部依赖：
+    #   · 一个智谱 API Key：set ANTHROPIC_API_KEY=xxx（embedding/生成/rerank/VLM 四者共用）
+    #     （检索嵌入用智谱 embedding-3；step1-3 教学线的本地 Ollama 在本步退役，见改造④）
     #   · pip install -r requirements.txt（含 pymilvus + milvus-lite）
     python -X utf8 step4_app/demo.py
     # → 浏览器自动打开 http://127.0.0.1:7860
@@ -33,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -56,29 +60,37 @@ RRF_K = 60      # RRFRanker 的 k（同 step3 手写 rrf_merge 的默认值）
 
 
 # ================================================================
-# 复用：Embedder / RecursiveTextSplitter（同 step1，内联以便自包含）
-# 几块逻辑和 step1 一致（省去前面 step 已讲过的 docstring）。
 # ================================================================
-_DEFAULT_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-_DEFAULT_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")
+# 换件：embedding 从本地 Ollama 换成智谱 embedding-3 API（教学版见 step1）
+# 产品线的取舍：实测单查嵌入 ~390ms vs 本地（GTX970 Vulkan）~2200ms——检索总延迟
+# 2.7s 的八成花在本地嵌入上，切 API 后降到 ~0.9s；同一份评测集验证命中@3 持平
+#（76.9%，见 README §3）。代价：检索也依赖 Key 与网络，且换模型=向量空间不兼容，
+# 库必须全量重灌。
+# ================================================================
+_ZHIPU_EMBED_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
+_ZHIPU_EMBED_DIM = 1024        # 必须与 schema 的 vector 维度一致（API 不指定默认 2048）
 
 
-class Embedder:
-    def __init__(self, base_url: str = _DEFAULT_BASE_URL, model: str = _DEFAULT_MODEL):
-        self.base_url = base_url
-        self.model = model
+class ZhipuEmbedder:
+    """智谱 embedding-3：1024 维与 schema 对齐；与生成 / rerank / VLM 共用同一个智谱 Key"""
+
+    def __init__(self, api_key: str):
+        self.model = "embedding-3"
+        self.api_key = api_key
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """批量嵌入：一次请求把多段文本都变成向量。"""
         resp = requests.post(
-            f"{self.base_url}/api/embed",
-            json={"model": self.model, "input": list(texts)},
+            _ZHIPU_EMBED_URL,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={"model": self.model, "input": list(texts), "dimensions": _ZHIPU_EMBED_DIM},
             timeout=60,
         )
         resp.raise_for_status()
-        return resp.json()["embeddings"]
+        data = sorted(resp.json()["data"], key=lambda d: d["index"])   # 批量返回按 index 对齐
+        return [d["embedding"] for d in data]
 
 
+# 复用：RecursiveTextSplitter（同 step1，内联以便自包含；省去已讲过的 docstring）
 class RecursiveTextSplitter:
     # 按优先级从高到低排列的分隔符：段落 → 换行 → 句号 → … → 空格 → 空串（字符级兜底，必须放末尾）
     SEPARATORS = ("\n\n", "\n", "。", "！", "？", "；", "，", " ", "")
@@ -128,7 +140,7 @@ class RecursiveTextSplitter:
 # step3 里 VectorStore(JSON+numpy余弦) + BM25Index(jieba手搓Okapi) + rrf_merge(1/(k+rank))
 # 三件各管一段；这里一张 collection 全包了：
 #   · text 字段开 jieba 分析器 + BM25 函数 → 稀疏路：插的是原文，分词建索引库内自己干
-#   · vector 字段 HNSW/COSINE 索引 → 稠密路：向量仍由 Ollama 算好喂进来
+#   · vector 字段 HNSW/COSINE 索引 → 稠密路：向量由智谱 embedding-3 算好喂进来
 #   · hybrid_search(两路, RRFRanker) → 融合：step3 手写的名次归并，库里一个参数
 # ================================================================
 class MilvusStore:
@@ -645,7 +657,7 @@ def main():
             raise SystemExit("未提供 API Key，退出")
         generator.api_key = key
 
-    embedder = Embedder()
+    embedder = ZhipuEmbedder(generator.api_key)   # 检索嵌入与生成共用智谱 Key（Ollama 在本步退役）
     splitter = RecursiveTextSplitter(chunk_size=400, chunk_overlap=50)   # 同 step3 ingest 口径
     reranker = Reranker(generator.api_key)     # 精排与生成共用同一个智谱 Key
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -656,7 +668,18 @@ def main():
     print(f"Mini-RAG 聊天应用  ·  检索 {embedder.model}  ·  生成 {generator.model}")
     print(f"向量库：{store.chunk_count()} 个 chunk  ·  Milvus Lite（data/mini_rag.db）·  API Key：已配置")
     print("浏览器打开 http://127.0.0.1:7860  ·  Ctrl+C 退出")
+    if os.environ.get("DINGTALK_CLIENT_ID") and os.environ.get("DINGTALK_CLIENT_SECRET"):
+        print("检测到钉钉凭据：机器人线程将随服务启动（Stream 模式，见 bot.py）")
     print("=" * 60)
+    # 钉钉机器人（可选，改造⑥）：两个凭据 env 都设了才起。同进程起线程而不是另起进程
+    # ——Milvus Lite 单进程文件锁，bot 与 Flask 必须共库同进程（bot.py import demo 复用单例）
+    if os.environ.get("DINGTALK_CLIENT_ID") and os.environ.get("DINGTALK_CLIENT_SECRET"):
+        # 坑：本文件作为入口运行时模块名是 __main__，bot.py 里 import demo 会再加载
+        # 一份**没跑过 main() 的裸副本**（单例全是 AttributeError）。把 __main__ 注册成
+        # demo，bot 拿到的才是同一个正在跑的模块
+        sys.modules["demo"] = sys.modules["__main__"]
+        import bot                                  # 局部导入：bot 又 import demo，放模块级会成环
+        threading.Thread(target=bot.bot_main, daemon=True, name="dingtalk-bot").start()
     # 等服务真的起来再开页（app.run 是阻塞的，直接 open 会抢在端口监听之前）
     threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:7860")).start()
     app.run(host="127.0.0.1", port=7860)

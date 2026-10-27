@@ -9,3 +9,5 @@ milvus-lite
 # 多模态 PDF 解析（step4）：PDF 抽元素 + 表格转 HTML
 pymupdf
 pandas
+# 钉钉机器人（step4 附加层）：Stream 模式出站 WebSocket，免公网接入
+dingtalk-stream

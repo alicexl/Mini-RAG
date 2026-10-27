@@ -5,7 +5,7 @@
 
 ## 快速开始
 
-前提同 [Step 3](../step3_rag/README.md)：Ollama 已启动（检索本地）+ 智谱 API Key（生成 / rerank / VLM 图片描述三者共用同一个 Key）+ `pip install -r requirements.txt`（本步新增 pymilvus / milvus-lite / pymupdf / pandas）。注意 Web 请求处理里没有 stdin，Key 只认环境变量 / 常量 / 启动时的交互确认（见 §2 改造②），没配会在生成时报错、以 SSE error 事件显示在聊天气泡里。另：Milvus Lite 一次只允许一个进程打开 `data/mini_rag.db`（文件锁），别开 Flask 的 debug reloader——它会起父子两个进程抢锁：
+前提：一个智谱 API Key（**embedding / 生成 / rerank / VLM 图片描述四者共用**，本步不再依赖 Ollama——检索嵌入已换成智谱 embedding-3，见 §2 改造④）+ `pip install -r requirements.txt`（本步新增 pymilvus / milvus-lite / pymupdf / pandas）。注意 Web 请求处理里没有 stdin，Key 只认环境变量 / 常量 / 启动时的交互确认（见 §2 改造②），没配会在生成时报错、以 SSE error 事件显示在聊天气泡里。另：Milvus Lite 一次只允许一个进程打开 `data/mini_rag.db`（文件锁），别开 Flask 的 debug reloader——它会起父子两个进程抢锁：
 
 ```bash
 set ANTHROPIC_API_KEY=你的智谱key    # macOS/Linux 用 export
@@ -48,7 +48,7 @@ RAG 内核（两级检索 → 拼 context → system 约束 → 生成；底座�
 
 ---
 
-## 2. 动手：四个产品化改造
+## 2. 动手：六个产品化改造
 
 前 3 步把原理摊开讲完了，这一步在产品化的同时做一次「零件升级」：`Embedder` / `RecursiveTextSplitter` / `Reranker` / `SYSTEM_PROMPT` / `build_context` 原样内联复用；**step3 手搓的检索三件套 `VectorStore`（JSON+numpy 余弦）/ `BM25Index`（手写 Okapi）/ `rrf_merge`（名次归并）整体退休**，换成一个 `MilvusStore`（见改造④）。新增的代码就两类：**流式的 Generator** 和 **Flask 的 Web 层**。
 
@@ -197,6 +197,8 @@ hits = client.hybrid_search("docs", [dense, sparse],
 
 「生产同款」的真正含义：把 `MilvusStore` 里的 db 路径换成 `http://localhost:19530`（Milvus Standalone，Docker 起）或 Zilliz Cloud 的 uri，其余 API 一行不改——教学件到生产件的迁移路径就是换一个连接串。
 
+**embedding 换成智谱 API（本地 Ollama 在本步退役）**：前三步的检索嵌入一直是本地 Ollama（离线免 Key 的教学件）；这一步换智谱 embedding-3（与生成共用 Key，`dimensions=1024` 对齐 schema）。为什么换——实测（GTX970 Vulkan）：本地单查嵌入 ~2.2s，**占检索总延迟的八成**；换 API 后检索中位 2746ms → **912ms**。切换前跑了同一份评测集对比（§3）：**命中@3 持平（76.9%）**、答对 79.5% → 76.9%——丢的一分恰是 C06 那个「推算侥幸」case（本地版靠检索送来的产量/消费量现场算出 67%；换向量后送不上这两个数、如实答不出，反而更诚实）；Top-1 从 69.2% 降到 53.8%（精排第一名换了人，但都还在 Top-3 里，被生成层吸收）。**快 3 倍、端到端质量持平**——这就是「用评测而不是感觉做技术决策」的完整示范。代价两条：检索也依赖网络与 Key（丢掉「检索离线」，step1-3 的教学线不受影响）；换模型 = 向量空间不兼容，旧库必须清空重灌。
+
 来源面板也随之变干净：不再显示 `sim`（向量相似度）和路由标记（手搓三段式的讲解道具），只留 `rrf`（库内融合分）+ `score`（rerank 精排分）+ 出处。
 
 ### 改造⑤：多模态检索（PDF 的正文 / 表格 / 图片）
@@ -222,9 +224,46 @@ hits = client.hybrid_search("docs", [dense, sparse],
 
 schema 相应加三个字段（`chunk_type` / `content` / `page`），旧库自动检测重建。超长表格按行拆片这类扩展先不做——本语料最大表格 23 行、HTML 几 KB，VARCHAR 65535 远够；真遇到几百行的表再上。
 
+### 改造⑥：接入钉钉机器人（Stream 模式，可选）
+
+到这里 RAG 还活在浏览器里。这一步把它接进**聊天工具**：钉钉里直接 @机器人 提问，答案带着引用来源回到聊天窗口——`bot.py` 一个文件，检索/生成链路零改动。
+
+**通道为什么选 Stream 模式**：钉钉机器人收消息有两种接法。Webhook 模式要求一个**公网可访问的 HTTPS 回调地址**——家庭宽带 NAT 后面就得内网穿透、域名、证书全套；Stream 模式是**出站 WebSocket**：本进程主动连钉钉服务器，消息从平台推下来，零公网 IP、零域名、零证书，家里常开的机器直接能跑。这是「接入聊天工具」成本最低的路径，也是选它做 demo 的原因。
+
+```
+钉钉服务器 ←—WebSocket（出站）—→ bot 线程（与 Flask 同进程，见下）
+                                    │ conversation_id + 文本
+                                    ├─ SQLite 取该会话最近 3 轮（服务端会话）
+                                    ├─ retrieve → build_context → 非流式生成
+                                    ├─ 本轮问答落库（来源/延迟/token = 使用日志）
+                                    └─ markdown 回复：答案 + [N] 来源脚注
+```
+
+三个设计点，每个都有对照：
+
+- **会话状态从「前端持有」换成「服务端持有」**。改造② 里 Web 端的 history 由浏览器持有、随请求上送（无状态服务）；机器人没有「前端」，会话必须服务端存——SQLite 按 `conversation_id` 隔离（单聊/群聊天然分开），入史的是**原始问题**（不带参考资料，防多轮滚雪球，与 Web 端同口径）。这是聊天平台替你藏掉的另一半：现在两边都摊开过了。
+- **先 ACK 再异步回答**。生成延迟中位 5s、P95 可到 20s+，而 SDK 的 `process` 同步等完会触发钉钉**超时重推**（官方 issue 实锤）。所以收到消息立刻返回 ACK，生成丢线程池异步做，答完经消息自带的 `session_webhook` 回复；另按 `message_id` 去重挡住仍可能到达的重推。流式 SSE 在这里没有意义——机器人回复是整条消息，生成走非流式（同 eval 探针口径，顺手拿到 token 用量）。
+- **history 表就是使用日志**。每轮把问题、答案、命中来源、延迟、token 落库——「检索质量」坏例的排查、真实 query 分布的积累，都从这张表长出来。小范围落地最先该有的不是功能，是这张表。
+- **一个 `__main__` 双模块坑**：`python demo.py` 运行时本模块名是 `__main__`，而 bot.py 里 `import demo` 会再加载一份**没跑过 main() 的裸副本**（单例全是 AttributeError——首轮实测就撞上了）。修法一行：起 bot 线程前 `sys.modules["demo"] = sys.modules["__main__"]`，把入口模块注册成 demo，bot 拿到的才是同一个正在跑的模块。入口脚本 + 被别的模块 import，两顶帽子戴在一个文件上时必踩。
+
+工程上的一个约束决定了形态：**bot 是 Flask 同进程里的线程，不是独立进程**——Milvus Lite 单进程文件锁，两个进程各开一次库必挂；同进程线程则共享 `main()` 里接好线的单例，检索/生成代码一行不改。
+
+启动（两个 env 都设才起线程，不设则行为与之前完全一致）：
+
+```bash
+set DINGTALK_CLIENT_ID=xxx        # 钉钉开放平台 → 应用 → 凭据与基础信息
+set DINGTALK_CLIENT_SECRET=xxx
+set ANTHROPIC_API_KEY=你的智谱key
+python -X utf8 step4_app/demo.py  # Flask 照常起，控制台多一行 "[BOT] 钉钉机器人已启动"
+```
+
+钉钉侧一次性配置：注册团队 → [open-dev.dingtalk.com](https://open-dev.dingtalk.com) 创建应用 → 添加「机器人」能力 → 消息接收模式选 **Stream 模式**。**不发布也能用**（实测：未发布、未认证的个人团队，Stream 收发消息全部正常——文档里的「组织认证」要求挡的是正式发布流程，不是消息通道；管理员搜索应用名即可找到机器人开聊）。
+
+边界（小范围信任圈的刻意取舍）：不做用户白名单和 token 熔断（群里都是熟人，配额风险可控，真要用再加十几行）；非文字消息（图片/文件）回复「暂时只支持文字提问」；多租户/权限隔离仍然没有——这已经是对话轮到「系统设计」题了，不是 demo 题。
+
 ### 跑起来
 
-前提同 step3：Ollama 已启动（qwen3-embedding:0.6b），Key 设成环境变量，然后 `python -X utf8 step4_app/demo.py`。首次启动自动创建空库 `data/mini_rag.db`；库里留着上次的数据则直接接着用（落库即持久化，重启不丢）。点「导入」选 `sample_reports/盐湖股份2024年报（精选页）.pdf`（PDF 分支会先跑多模态解析 + 11 张图逐张过 VLM，约半分钟）：
+前提：智谱 Key 设成环境变量（本步不依赖 Ollama），然后 `python -X utf8 step4_app/demo.py`。首次启动自动创建空库 `data/mini_rag.db`；库里留着上次的数据则直接接着用（落库即持久化，重启不丢）。点「导入」选 `sample_reports/盐湖股份2024年报（精选页）.pdf`（PDF 分支会先跑多模态解析 + 11 张图逐张过 VLM，约半分钟）：
 
 ```
 [OK]「盐湖股份2024年报（精选页）」+35 块（20文本 + 4表格 + 11图片，VLM 描述 11/11）
@@ -332,7 +371,7 @@ data: {}
 
 ### 跑起来：判分与指标
 
-前提同 demo.py（Ollama + Key + 库里已导入精选页 PDF），每条 case 独立跑 3 次完整链路（生成是概率性的，跑一次说明不了什么）：
+前提同 demo.py（Key + 库里已导入精选页 PDF），每条 case 独立跑 3 次完整链路（生成是概率性的，跑一次说明不了什么）：
 
 ```bash
 python -X utf8 step4_app/eval.py            # 或 --runs 5 调多次试验的次数
