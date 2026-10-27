@@ -214,7 +214,7 @@ hits = client.hybrid_search("docs", [dense, sparse],
 
 三个关键设计，每个都对应一个「为什么」：
 
-- **embed 用文本化、生成用 HTML**——LLM 读 HTML 表格的理解远好于线性化文本，但 embedding 和 BM25 吃 HTML 标签是纯噪声。所以同一个 chunk 存两份：`text` 给检索链路，`content` 给拼 context。小表格的内联机制：元素流里放边界标记 `〔表格T0〕文本化内容〔/表格T0〕`，切块后 text 版剥标记、content 版把标记对替换回 HTML——标记只活在切块瞬间，两头都不污染。
+- **embed 用文本化、生成用 HTML**——LLM 读 HTML 表格的理解远好于线性化文本，但 embedding 和 BM25 吃 HTML 标签是纯噪声。所以同一个 chunk 存两份：`text` 给检索链路，`content` 给拼 context。一句话：**两路召回、RRF 融合、rerank 精排，全链路只看 text；只有最终生成的时候，才把 content 里的原始信息展示给模型**。小表格的内联机制：元素流里放边界标记 `〔表格T0〕文本化内容〔/表格T0〕`，切块后 text 版剥标记、content 版把标记对替换回 HTML——标记只活在切块瞬间，两头都不污染。
 - **图片走 VLM 生成描述**——描述是纯文本，天然进同一个 embedding 空间；原件落 `data/media/`，chunk 的 content 里只存文件名。命中图片块时来源面板直接回显原图（`GET /api/media/<文件名>`）。VLM 失败不阻塞入库：描述降级为占位符，11 张图里挂一张不影响剩下十张（离线管道的容错原则）。
 - **rerank 只看 text**——表格/图片以文本化形态参与精排，三种模态归一到同一竞争空间。这就是多模态检索的口径：模态差异在入库时消化（解析→文本化），检索链路一行不改。
 
