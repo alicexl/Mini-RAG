@@ -1,0 +1,29 @@
+============================================================
+Mini-RAG 聊天应用  ·  检索 embedding-3  ·  生成 deepseek-flash
+向量库：35 个 chunk  ·  Milvus Lite（data/mini_rag.db）·  API Key：已配置
+浏览器打开 http://127.0.0.1:7860  ·  Ctrl+C 退出
+检测到钉钉凭据：机器人线程将随服务启动（Stream 模式，见 bot.py）
+============================================================
+ * Serving Flask app 'demo'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:7860
+Press CTRL+C to quit
+2026-10-28 11:39:54,231 [BOT] INFO 钉钉机器人已启动（Stream 模式，出站连接免公网）· 等待消息…
+2026-10-28 11:39:54,232 dingtalk_stream.client INFO     open connection, url=https://api.dingtalk.com/v1.0/gateway/connections/open [stream.py:149]
+2026-10-28 11:39:54,494 dingtalk_stream.client INFO     endpoint is {'endpoint': 'wss://wss-open-connection-union.dingtalk.com:443/connect', 'ticket': '3d4e27a7-d281-11f1-a8a3-3a7febb7e4ed'} [stream.py:71]
+127.0.0.1 - - [28/Oct/2026 11:39:55] "GET / HTTP/1.1" 304 -
+127.0.0.1 - - [28/Oct/2026 11:39:55] "GET /api/status HTTP/1.1" 200 -
+I1028 03:40:54.044178    6928 chttp2_transport.cc:1393] ipv4:127.0.0.1:11742: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_pings {http2_error:11}
+E1028 03:40:54.044283    6928 chttp2_transport.cc:1425] ipv4:127.0.0.1:11742: Received a GOAWAY with error code ENHANCE_YOUR_CALM and debug data equal to "too_many_pings". Current keepalive time (before throttling): 10000ms
+Building prefix dict from the default dictionary ...
+Loading model from cache C:\Users\Xulu\AppData\Local\Temp\jieba.cache
+Loading model cost 0.727 seconds.
+Prefix dict has been built successfully.
+2026-10-28 11:40:56,713 [BOT] INFO 卡片 d870bf60df270257def006c1cafb57356cd4a849238e7014f39a681e49507791
+2026-10-28 11:40:57,831 [BOT] INFO 流式 1 帧 / 共 251 字
+2026-10-28 11:40:58,156 [BOT] INFO 终帧(isFinalize) 343 字
+2026-10-28 11:40:58,422 [BOT] INFO 卡片定稿 343 字
+2026-10-28 11:40:58,422 [BOT] INFO 徐璐: 2024年利润多少 → 251 字 · 3770ms · 2575 tokens · rerank正常
+I1028 03:43:05.407420    6928 chttp2_transport.cc:1393] ipv4:127.0.0.1:11742: Got goaway [11] err=UNAVAILABLE:GOAWAY received; Error code: 11; Debug Text: too_many_pings {http2_error:11}
+E1028 03:43:05.407491    6928 chttp2_transport.cc:1425] ipv4:127.0.0.1:11742: Received a GOAWAY with error code ENHANCE_YOUR_CALM and debug data equal to "too_many_pings". Current keepalive time (before throttling): 10000ms

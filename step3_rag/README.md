@@ -301,6 +301,6 @@ system prompt 说「禁止编造」，但 LLM 不一定每次都听话。它仍�
 
 ## 下一步
 
-[Step 4：Web 聊天界面 + Milvus 底座 →](../step4_app/README.md)
+产品化续篇（Web 聊天 + Milvus 底座 + 多模态 + 评测 + 钉钉机器人）→ [ragbot](https://github.com/alicexl/ragbot)
 
 现在 RAG 还是在命令行里跑、改代码换文档。最后一步给它套一个聊天界面——输入问题、流式出答案、能换文档，让这套 RAG 像一个真正能用的产品。
