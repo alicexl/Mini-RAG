@@ -243,7 +243,8 @@ def bot_main():
     asyncio.set_event_loop(loop)
     client = dingtalk_stream.DingTalkStreamClient(dingtalk_stream.Credential(cid, secret))
     client.register_callback_handler(dingtalk_stream.ChatbotMessage.TOPIC,
-                                     RAGBotHandler(Anthropic(base_url=demo._CHAT_BASE_URL, api_key=key)))
+                                     RAGBotHandler(Anthropic(base_url=demo._CHAT_BASE_URL,
+                                                             api_key=demo._CHAT_API_KEY)))
     log.info("钉钉机器人已启动（Stream 模式，出站连接免公网）· 等待消息…")
     try:
         client.start_forever()          # 阻塞常驻，网络异常自动重连

@@ -88,7 +88,7 @@ def main():
         raise SystemExit(f"智谱 embedding 不可用（{e}）：检查 ANTHROPIC_API_KEY 与网络")
     demo.store = demo.MilvusStore(str(demo.DATA_DIR / "mini_rag.db"))
     demo.reranker = demo.Reranker(key)
-    client = Anthropic(base_url=demo._CHAT_BASE_URL, api_key=key)
+    client = Anthropic(base_url=demo._CHAT_BASE_URL, api_key=demo._CHAT_API_KEY)
 
     n_chunks = demo.store.chunk_count()
     if not n_chunks:

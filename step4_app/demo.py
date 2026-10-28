@@ -404,6 +404,10 @@ API_KEY = ""   # 没设 env 时兜底（推荐用环境变量 ANTHROPIC_API_KEY�
 
 _CHAT_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
 _CHAT_MODEL = os.environ.get("ANTHROPIC_CHAT_MODEL", "glm-5.3")
+# 生成商可单独换（如 DeepSeek 的 anthropic 兼容端点）：CHAT_API_KEY 只给 chat 用，
+# ANTHROPIC_API_KEY 始终是智谱 Key（embedding / rerank / VLM 固定智谱，不跟着生成走）
+_CHAT_API_KEY = os.environ.get("CHAT_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or API_KEY
+_ZHIPU_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or API_KEY
 
 
 class Generator:
@@ -417,7 +421,7 @@ class Generator:
     def __init__(self, base_url: str = _CHAT_BASE_URL, model: str = _CHAT_MODEL):
         self.base_url = base_url
         self.model = model
-        self.api_key = os.environ.get("ANTHROPIC_API_KEY") or API_KEY
+        self.api_key = _CHAT_API_KEY
 
     def answer_stream(self, system: str, messages: list[dict], max_tokens: int = 2048):
         if not self.api_key:
@@ -545,7 +549,7 @@ def _ingest_pdf(data: bytes, source: str) -> tuple[int, bool, str]:
     """多模态分支（PDF）：解析 → 向量化 → 入库。幂等同上（media 文件也随 source 一起跳过）。"""
     if store.has_source(source):
         return 0, False, f"[SKIP]「{source}」已在库中"
-    rows, vlm_ok = parse_pdf(data, source, generator.api_key)
+    rows, vlm_ok = parse_pdf(data, source, _ZHIPU_API_KEY)   # VLM 固定智谱 Key（与生成商无关）
     if not rows:
         return 0, True, f"[WARN]「{source}」未解析出内容（扫描件？本 demo 只吃有文字层的 PDF）"
     store.insert_rows(rows, embedder.embed_batch([r["text"] for r in rows]), source)
@@ -657,9 +661,9 @@ def main():
             raise SystemExit("未提供 API Key，退出")
         generator.api_key = key
 
-    embedder = ZhipuEmbedder(generator.api_key)   # 检索嵌入与生成共用智谱 Key（Ollama 在本步退役）
+    embedder = ZhipuEmbedder(_ZHIPU_API_KEY)   # 检索嵌入固定智谱 Key（Ollama 在本步退役）
     splitter = RecursiveTextSplitter(chunk_size=400, chunk_overlap=50)   # 同 step3 ingest 口径
-    reranker = Reranker(generator.api_key)     # 精排与生成共用同一个智谱 Key
+    reranker = Reranker(_ZHIPU_API_KEY)   # rerank 固定智谱 Key（生成可另配 CHAT_API_KEY 走别家）
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)          # 图片原件落这里（VLM 描述入 chunk）
     store = MilvusStore(str(DATA_DIR / "mini_rag.db"))   # 打开/创建 Milvus Lite 单文件库

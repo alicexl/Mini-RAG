@@ -199,6 +199,8 @@ hits = client.hybrid_search("docs", [dense, sparse],
 
 **embedding 换成智谱 API（本地 Ollama 在本步退役）**：前三步的检索嵌入一直是本地 Ollama（离线免 Key 的教学件）；这一步换智谱 embedding-3（与生成共用 Key，`dimensions=1024` 对齐 schema）。为什么换——实测（GTX970 Vulkan）：本地单查嵌入 ~2.2s，**占检索总延迟的八成**；换 API 后检索中位 2746ms → **912ms**。切换前跑了同一份评测集对比（§3）：**命中@3 持平（76.9%）**、答对 79.5% → 76.9%——丢的一分恰是 C06 那个「推算侥幸」case（本地版靠检索送来的产量/消费量现场算出 67%；换向量后送不上这两个数、如实答不出，反而更诚实）；Top-1 从 69.2% 降到 53.8%（精排第一名换了人，但都还在 Top-3 里，被生成层吸收）。**快 3 倍、端到端质量持平**——这就是「用评测而不是感觉做技术决策」的完整示范。代价两条：检索也依赖网络与 Key（丢掉「检索离线」，step1-3 的教学线不受影响）；换模型 = 向量空间不兼容，旧库必须清空重灌。
 
+**生成商也可以单独换**（`CHAT_API_KEY` 只给 chat 用，检索侧的 embedding / rerank / VLM 始终走智谱 Key）：DeepSeek 提供 anthropic 兼容端点，设 `CHAT_API_KEY=你的DeepSeekKey` + `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic` + `ANTHROPIC_CHAT_MODEL=deepseek-flash` 即完成切换，代码零改动。同一评测集实测：deepseek-flash **答对 76.9% 与 glm-5.3 完全持平**（失败 case 一致）、拒绝率 100% 不变，而生成中位 5.9s → **1.4s**、P95 19.8s → **4.1s**（glm 的 20 秒级首字长尾消失）、单次 token 少 63%——机器人的打字机从「等 3~6 秒出首字」变成「约 1.5 秒开始出字」。默认仍是智谱 glm-5.3：只配一个 Key 也能开箱即跑，切换是纯 env 选项。
+
 来源面板也随之变干净：不再显示 `sim`（向量相似度）和路由标记（手搓三段式的讲解道具），只留 `rrf`（库内融合分）+ `score`（rerank 精排分）+ 出处。
 
 ### 改造⑤：多模态检索（PDF 的正文 / 表格 / 图片）
