@@ -31,6 +31,7 @@ message 拿（get_final_message 在 with 块内，这正是流式也能记账的
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -42,6 +43,14 @@ from dingtalk_stream import AckMessage
 
 import demo                                    # 单例（embedder/store/reranker）在 demo.main() 里接线，本模块同进程直接用
 from anthropic import Anthropic
+
+# bot 自己的日志走 stderr（实时）——print 在后台进程里是块缓冲，出问题时看不见现场
+log = logging.getLogger("bot")
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s [BOT] %(levelname)s %(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
 
 # 会话历史：SQLite 落库（服务端持有，与 Web 端「前端持有」对照）；文件与 Milvus 库同目录
 HISTORY_DB = str(demo.DATA_DIR / "bot_history.db")
@@ -90,7 +99,7 @@ def generate_stream(client: Anthropic, question: str, history: list[dict],
     - usage 从 get_final_message() 拿——流式也能记账的关键（在 with 块内）"""
     context = demo.build_context(retrieved)
     user_msg = f"【参考资料】\n{context}\n\n【用户问题】\n{question}"
-    buf, last_push = "", 0.0
+    buf, last_push, n_push = "", 0.0, 0
     with client.messages.stream(model=demo._CHAT_MODEL, max_tokens=2048,
                                 system=demo.SYSTEM_PROMPT,
                                 messages=history + [{"role": "user", "content": user_msg}],
@@ -99,9 +108,18 @@ def generate_stream(client: Anthropic, question: str, history: list[dict],
             buf += delta
             now = time.time()
             if card and now - last_push >= 1.0:
-                card.ai_streaming(buf)          # 全量替换式打字机
+                # 首帧走 ai_streaming（顺带把卡片置 INPUTING 打字机态），后续帧底层
+                # 直发全量；SDK 的 ai_streaming 收不了尾（永远 finished=False，卡片
+                # 会挂在流式会话里），isFinalize 终帧由调用方补——三要素缺一不可
+                if n_push == 0:
+                    card.ai_streaming(buf)
+                else:
+                    card.streaming(card.card_instance_id, "msgContent", buf,
+                                   append=False, finished=False, failed=False)
+                n_push += 1
                 last_push = now
         usage = s.get_final_message().usage
+    log.info("流式 %d 帧 / 共 %d 字", n_push, len(buf))
     return buf, usage.input_tokens + usage.output_tokens
 
 
@@ -175,9 +193,15 @@ class RAGBotHandler(dingtalk_stream.ChatbotHandler):
         t0 = time.perf_counter()
         retrieved, reranked = demo.retrieve(question, top_k=demo.TOP_K)
 
-        # AI 卡片先上（「执行中」占位）——失败降级为整条 markdown 回复，链路不断
+        # AI 卡片先上（「执行中」占位）——失败降级为整条 markdown 回复，链路不断。
+        # 注意 SDK 的坑：建卡片失败是**静默的**（只记日志不抛异常，card_instance_id
+        # 留空），必须显式校验，否则废卡会吞掉降级路径——消息进来却一条都不回
         try:
-            holder["card"] = self.ai_markdown_card_start(msg, title="Mini-RAG")
+            card = self.ai_markdown_card_start(msg, title="Mini-RAG")
+            holder["card"] = card if getattr(card, "card_instance_id", None) else None
+            if card and holder["card"] is None:
+                self.logger.warning("AI 卡片创建静默失败（权限未开通？Card.Instance.Write），降级整条回复")
+            log.info("卡片 %s", holder["card"].card_instance_id if holder["card"] else "降级整条回复")
         except Exception as e:
             self.logger.warning(f"AI 卡片创建失败，降级整条回复：{e}")
 
@@ -191,11 +215,19 @@ class RAGBotHandler(dingtalk_stream.ChatbotHandler):
                        latency_ms=latency_ms, tokens=tokens)
         reply_md = build_reply(answer, retrieved)
         if holder["card"]:
-            holder["card"].ai_finish(reply_md)           # 定稿：答案 + 来源脚注
+            c = holder["card"]
+            # isFinalize 终帧：把流式会话按协议收掉（含来源脚注全文），再走 ai_finish
+            # 刷完成态——两步都做，钉钉端哪个生效都能看到全文
+            c.streaming(c.card_instance_id, "msgContent", reply_md,
+                        append=False, finished=True, failed=False)
+            log.info("终帧(isFinalize) %d 字", len(reply_md))
+            c.ai_finish(reply_md)
+            log.info("卡片定稿 %d 字", len(reply_md))
         else:
             self.reply_markdown("Mini-RAG", reply_md, msg)
-        print(f"[BOT] {nick}: {question[:40]} → 回复 {len(answer)} 字"
-              f" · {latency_ms}ms · {tokens} tokens · rerank{'正常' if reranked else '降级'}")
+            log.info("整条回复 %d 字", len(reply_md))
+        log.info("%s: %s → %d 字 · %dms · %d tokens · rerank%s",
+                 nick, question[:40], len(answer), latency_ms, tokens, "正常" if reranked else "降级")
 
 
 def bot_main():
@@ -212,8 +244,8 @@ def bot_main():
     client = dingtalk_stream.DingTalkStreamClient(dingtalk_stream.Credential(cid, secret))
     client.register_callback_handler(dingtalk_stream.ChatbotMessage.TOPIC,
                                      RAGBotHandler(Anthropic(base_url=demo._CHAT_BASE_URL, api_key=key)))
-    print("[BOT] 钉钉机器人已启动（Stream 模式，出站连接免公网）· 等待消息…")
+    log.info("钉钉机器人已启动（Stream 模式，出站连接免公网）· 等待消息…")
     try:
         client.start_forever()          # 阻塞常驻，网络异常自动重连
     except Exception as e:
-        print(f"[BOT] Stream 连接退出：{e}")
+        log.error("Stream 连接退出：%s", e)
